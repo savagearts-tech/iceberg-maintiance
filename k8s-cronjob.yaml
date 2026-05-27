@@ -1,0 +1,51 @@
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: iceberg-maintenance
+  labels:
+    app: iceberg-maintenance
+spec:
+  schedule: "0 2 * * *"
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          serviceAccountName: iceberg-maintenance
+          containers:
+          - name: maintenance
+            image: iceberg-maintenance:latest
+            args: ["expire", "$(TABLE_NAME)"]
+            env:
+            - name: ICE_BERG_JDBC_URL
+              valueFrom:
+                secretKeyRef:
+                  name: iceberg-jdbc
+                  key: url
+            - name: ICE_BERG_JDBC_USER
+              valueFrom:
+                secretKeyRef:
+                  name: iceberg-jdbc
+                  key: username
+            - name: ICE_BERG_JDBC_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: iceberg-jdbc
+                  key: password
+            - name: ICE_BERG_WAREHOUSE
+              value: "s3a://data-warehouse/"
+            - name: ICE_BERG_TABLE_NAME
+              value: "fds_db.trace_events"
+            - name: ICE_BERG_TABLE_DATAPREFIX
+              value: "s3a://data-warehouse/fds_db/trace_events/data"
+            - name: ICE_BERG_S3_REGION
+              value: "us-east-1"
+            - name: ICE_BERG_DRYRUN
+              value: "true"
+            resources:
+              requests:
+                memory: "512Mi"
+                cpu: "500m"
+              limits:
+                memory: "1Gi"
+                cpu: "1"
+          restartPolicy: OnFailure
