@@ -3,13 +3,13 @@
          xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
     <modelVersion>4.0.0</modelVersion>
 
-    <groupId>com.fds.iceberg</groupId>
+    <groupId>io.github.iceberg</groupId>
     <artifactId>iceberg-maintenance</artifactId>
     <version>1.0.0-SNAPSHOT</version>
     <packaging>pom</packaging>
 
     <name>Iceberg Maintenance Tool</name>
-    <description>FDS platform Iceberg storage maintenance tool with JDBC catalog, partition pruning, and two-stage zombie file cleanup</description>
+    <description>Iceberg storage maintenance tool with JDBC catalog, partition pruning, and two-stage zombie file cleanup</description>
 
     <modules>
         <module>common</module>
@@ -102,7 +102,7 @@
                                 <transformers>
                                     <transformer implementation="org.apache.maven.plugins.shade.resource.ServicesResourceTransformer"/>
                                     <transformer implementation="org.apache.maven.plugins.shade.resource.ManifestResourceTransformer">
-                                        <mainClass>com.fds.iceberg.cli.IcebergMaintenanceCli</mainClass>
+                                        <mainClass>io.github.iceberg.cli.IcebergMaintenanceCli</mainClass>
                                     </transformer>
                                 </transformers>
                                 <createDependencyReducedPom>false</createDependencyReducedPom>
