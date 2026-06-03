@@ -105,6 +105,29 @@ public class PhysicalDeletionService {
         return deleted;
     }
 
+    /**
+     * Deletes keys without cooling or directory-guard filters. Caller must enforce safety.
+     */
+    public List<String> deleteKeysDirect(String bucket, List<String> keys) {
+        if (keys == null || keys.isEmpty()) {
+            return List.of();
+        }
+        List<String> deleted = new ArrayList<>();
+        List<String> failed = new ArrayList<>();
+        List<String> batch = new ArrayList<>();
+        for (String key : keys) {
+            batch.add(key);
+            if (batch.size() >= BATCH_SIZE) {
+                deleteBatch(bucket, batch, deleted, failed);
+                batch.clear();
+            }
+        }
+        if (!batch.isEmpty()) {
+            deleteBatch(bucket, batch, deleted, failed);
+        }
+        return deleted;
+    }
+
     private void deleteBatch(String bucket, List<String> keys, List<String> deleted, List<String> failed) {
         List<ObjectIdentifier> objects = keys.stream()
                 .map(k -> ObjectIdentifier.builder().key(k).build())

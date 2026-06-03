@@ -2,15 +2,19 @@ package io.github.iceberg.cli;
 
 import io.github.iceberg.cleanup.*;
 import io.github.iceberg.common.RetentionConfig;
+import io.github.iceberg.common.UriNormalizer;
 import org.apache.iceberg.Table;
 import org.apache.iceberg.TableOperations;
+import org.apache.iceberg.catalog.TableIdentifier;
 import org.apache.iceberg.expressions.Expression;
+import org.apache.iceberg.jdbc.JdbcCatalog;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import software.amazon.awssdk.services.s3.S3Client;
 
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
 
@@ -29,15 +33,29 @@ public class CleanupCommand {
     private final int coolingDays;
     private final boolean dryRun;
     private final Expression partitionFilter;
+    private final boolean purgeEmptyTables;
+    private final boolean dropCatalog;
+    private final JdbcCatalog catalog;
+    private final TableIdentifier tableId;
 
     public CleanupCommand(Table table, TableOperations tableOperations, String tableDataPrefix,
                           RetentionConfig retentionConfig, S3Client s3Client, int coolingDays, boolean dryRun) {
-        this(table, tableOperations, tableDataPrefix, retentionConfig, s3Client, coolingDays, dryRun, null);
+        this(table, tableOperations, tableDataPrefix, retentionConfig, s3Client, coolingDays, dryRun, null,
+                false, false, null, null);
     }
 
     public CleanupCommand(Table table, TableOperations tableOperations, String tableDataPrefix,
                           RetentionConfig retentionConfig, S3Client s3Client, int coolingDays,
                           boolean dryRun, Expression partitionFilter) {
+        this(table, tableOperations, tableDataPrefix, retentionConfig, s3Client, coolingDays, dryRun, partitionFilter,
+                false, false, null, null);
+    }
+
+    public CleanupCommand(Table table, TableOperations tableOperations, String tableDataPrefix,
+                          RetentionConfig retentionConfig, S3Client s3Client, int coolingDays,
+                          boolean dryRun, Expression partitionFilter,
+                          boolean purgeEmptyTables, boolean dropCatalog,
+                          JdbcCatalog catalog, TableIdentifier tableId) {
         this.table = table;
         this.tableOperations = tableOperations;
         this.tableDataPrefix = tableDataPrefix;
@@ -46,6 +64,10 @@ public class CleanupCommand {
         this.coolingDays = coolingDays;
         this.dryRun = dryRun;
         this.partitionFilter = partitionFilter;
+        this.purgeEmptyTables = purgeEmptyTables;
+        this.dropCatalog = dropCatalog;
+        this.catalog = catalog;
+        this.tableId = tableId;
     }
 
     public void execute() {
@@ -65,17 +87,21 @@ public class CleanupCommand {
         System.out.println("Data orphans: " + scan.dataOrphans().size());
         System.out.println("Metadata orphans: " + scan.metadataOrphans().size());
 
-        Set<String> orphans = scan.dataOrphans();
-        if (orphans.isEmpty()) {
-            System.out.println("No orphan data files to delete.");
-            printReport(expiredIds, List.of(), List.of());
-            return;
-        }
+        Set<String> dataOrphans = scan.dataOrphans();
+        Set<String> metadataOrphans = scan.metadataOrphans();
 
         if (dryRun) {
-            System.out.println("Dry-run: would delete " + orphans.size() + " orphan data files:");
-            orphans.forEach(p -> System.out.println("  " + p));
-            printReport(expiredIds, List.of(), new ArrayList<>(orphans));
+            if (!dataOrphans.isEmpty()) {
+                System.out.println("Dry-run: would delete " + dataOrphans.size() + " orphan data files:");
+                dataOrphans.forEach(p -> System.out.println("  " + p));
+            }
+            if (!metadataOrphans.isEmpty()) {
+                System.out.println("Dry-run: would delete " + metadataOrphans.size() + " orphan metadata files:");
+                metadataOrphans.forEach(p -> System.out.println("  " + p));
+            }
+            printEmptyPartitionsDryRun(scan, dataOrphans);
+            printEmptyTableDryRun(scan, dataOrphans, metadataOrphans);
+            printReport(expiredIds, List.of(), List.of(), List.of());
             return;
         }
 
@@ -84,24 +110,175 @@ public class CleanupCommand {
         PhysicalDeletionService deletionService = new PhysicalDeletionService(s3Client, coolingFilter, dirGuard)
                 .withLastModifiedCache(scan.l2Scanner().getLastModifiedCache());
 
-        List<String> deleted = deletionService.deleteOrphans(orphans);
-        System.out.println("Deleted " + deleted.size() + " orphan data files");
-        LOG.info("Cleanup complete: {} orphans deleted", deleted.size());
-        printReport(expiredIds, deleted, List.of());
+        List<String> deletedData = List.of();
+        if (!dataOrphans.isEmpty()) {
+            deletedData = deletionService.deleteOrphans(dataOrphans);
+            System.out.println("Deleted " + deletedData.size() + " orphan data files");
+        } else {
+            System.out.println("No orphan data files to delete.");
+        }
+
+        List<String> deletedMetadata = List.of();
+        if (!metadataOrphans.isEmpty()) {
+            deletedMetadata = deletionService.deleteOrphans(metadataOrphans);
+            System.out.println("Deleted " + deletedMetadata.size() + " orphan metadata files");
+        }
+
+        Set<String> allDeletedFiles = new HashSet<>();
+        allDeletedFiles.addAll(deletedData);
+        allDeletedFiles.addAll(deletedMetadata);
+
+        EmptyPartitionCleaner partitionCleaner = new EmptyPartitionCleaner(s3Client, dirGuard, deletionService);
+        List<String> deletedPartitions = partitionCleaner.deleteEmptyPartitions(
+                tableDataPrefix,
+                scan.referencedFiles(),
+                scan.prefixes(),
+                allDeletedFiles);
+        if (!deletedPartitions.isEmpty()) {
+            System.out.println("Removed empty partition directories: " + deletedPartitions.size());
+            deletedPartitions.forEach(p -> System.out.println("  " + p));
+        } else {
+            System.out.println("No empty partition directories to remove.");
+        }
+
+        handleEmptyTable(scan, deletionService, dirGuard);
+
+        LOG.info("Cleanup complete: {} data orphans, {} metadata orphans, {} empty partitions",
+                deletedData.size(), deletedMetadata.size(), deletedPartitions.size());
+        printReport(expiredIds, deletedData, deletedMetadata, deletedPartitions);
     }
 
-    private void printReport(List<Long> expiredIds, List<String> deleted, List<String> wouldDelete) {
+    private void handleEmptyTable(OrphanScanPipeline.Result scan,
+                                  PhysicalDeletionService deletionService,
+                                  DirectoryGuard dirGuard) {
+        L2PhysicalScanner rescanner = new L2PhysicalScanner(s3Client);
+        Set<String> physicalAfter = rescanner.listFiles(scan.prefixes());
+        EmptyTableAnalyzer.Assessment assessment = EmptyTableAnalyzer.analyze(
+                tableDataPrefix, scan.referencedFiles(), physicalAfter);
+
+        if (!assessment.eligibleForTableCleanup()) {
+            explainTableCleanupBlocked(assessment, scan.referencedFiles(), physicalAfter);
+            return;
+        }
+
+        System.out.println("Table has no data files and no partitions on storage; eligible for table-level cleanup: "
+                + assessment.tableRootPrefix());
+        System.out.println("  metadata files still on storage: " + assessment.physicalMetadataFileCount());
+
+        if (!purgeEmptyTables) {
+            System.out.println("  Run list-empty-tables to review all empty tables, or re-run cleanup with --purge-empty-tables");
+            return;
+        }
+
+        EmptyTableCleaner tableCleaner = new EmptyTableCleaner(s3Client, dirGuard, deletionService);
+        List<String> purged = tableCleaner.purgeEmptyTableStorage(assessment, physicalAfter);
+        System.out.println("Purged " + purged.size() + " leftover storage object(s) for empty table");
+
+        Set<String> remaining = tableCleaner.listRemainingObjects(tableDataPrefix);
+        if (!remaining.isEmpty()) {
+            System.out.println("  Warning: " + remaining.size() + " object(s) still remain under table root");
+            return;
+        }
+
+        if (dropCatalog) {
+            if (catalog == null || tableId == null) {
+                System.err.println("  Cannot drop catalog entry: catalog not configured");
+                return;
+            }
+            catalog.dropTable(tableId);
+            System.out.println("Dropped table from catalog: " + tableId);
+            LOG.info("Dropped empty table from catalog: {}", tableId);
+        } else {
+            System.out.println("  Storage purged. Add --drop-catalog to remove the catalog entry.");
+        }
+    }
+
+    private void printEmptyTableDryRun(OrphanScanPipeline.Result scan,
+                                       Set<String> dataOrphans,
+                                       Set<String> metadataOrphans) {
+        Set<String> physicalAfter = new HashSet<>(scan.physicalFiles());
+        physicalAfter.removeAll(dataOrphans);
+        physicalAfter.removeAll(metadataOrphans);
+
+        Set<String> referenced = scan.referencedFiles();
+        List<String> partitionDirsToRemove = EmptyPartitionCleaner.collectCandidates(
+                        tableDataPrefix, scan.prefixes(), dataOrphans).stream()
+                .filter(p -> EmptyPartitionCleaner.isDataPartitionPrefix(p, tableDataPrefix))
+                .filter(p -> EmptyTableAnalyzer.isPartitionDeletable(p, referenced, physicalAfter))
+                .sorted()
+                .toList();
+        physicalAfter.removeIf(path -> partitionDirsToRemove.stream()
+                .anyMatch(prefix -> UriNormalizer.normalize(path).startsWith(
+                        UriNormalizer.normalize(prefix))));
+
+        EmptyTableAnalyzer.Assessment assessment = EmptyTableAnalyzer.analyze(
+                tableDataPrefix, referenced, physicalAfter);
+        if (!assessment.eligibleForTableCleanup()) {
+            explainTableCleanupBlocked(assessment, referenced, physicalAfter);
+            return;
+        }
+        System.out.println("Dry-run: table would be eligible for table-level cleanup after partition and orphan removal:");
+        System.out.println("  " + assessment.tableRootPrefix());
+        if (purgeEmptyTables) {
+            System.out.println("  would purge " + assessment.physicalMetadataFileCount()
+                    + " metadata file(s) on storage");
+            if (dropCatalog) {
+                System.out.println("  would drop catalog entry: " + table.name());
+            }
+        }
+    }
+
+    private void explainTableCleanupBlocked(EmptyTableAnalyzer.Assessment assessment,
+                                            Set<String> referencedFiles,
+                                            Set<String> physicalFiles) {
+        if (assessment.hasReferencedData()) {
+            System.out.println("Table-level cleanup blocked: metadata still references data files");
+            return;
+        }
+        if (assessment.physicalDataFileCount() > 0) {
+            System.out.println("Table-level cleanup blocked: "
+                    + assessment.physicalDataFileCount() + " data file(s) remain on storage");
+            return;
+        }
+        for (String partition : assessment.remainingPartitionPrefixes()) {
+            if (!EmptyTableAnalyzer.isPartitionDeletable(partition, referencedFiles, physicalFiles)) {
+                System.out.println("Table-level cleanup blocked: partition not yet deletable (stricter than table): "
+                        + partition);
+            } else {
+                System.out.println("Table-level cleanup blocked: partition directory still on storage (remove partitions first): "
+                        + partition);
+            }
+        }
+    }
+
+    private void printEmptyPartitionsDryRun(OrphanScanPipeline.Result scan, Set<String> dataOrphans) {
+        Set<String> referenced = scan.referencedFiles();
+        Set<String> candidates = EmptyPartitionCleaner.collectCandidates(
+                tableDataPrefix, scan.prefixes(), dataOrphans);
+        List<String> wouldClean = candidates.stream()
+                .filter(p -> EmptyPartitionCleaner.isDataPartitionPrefix(p, tableDataPrefix))
+                .filter(p -> !EmptyPartitionCleaner.hasReferencedDataFile(p, referenced))
+                .sorted()
+                .toList();
+        if (!wouldClean.isEmpty()) {
+            System.out.println("Dry-run: would remove empty partition directories: " + wouldClean.size());
+            wouldClean.forEach(p -> System.out.println("  " + p));
+        }
+    }
+
+    private void printReport(List<Long> expiredIds, List<String> deletedData,
+                             List<String> deletedMetadata, List<String> deletedPartitions) {
         CleanupReport report = new CleanupReport(
                 Instant.now(),
                 table.name().toString(),
                 expiredIds,
-                deleted,
-                List.of(),
+                deletedData,
+                deletedMetadata,
                 0L,
                 List.of());
         System.out.println(report.summary());
-        if (!wouldDelete.isEmpty()) {
-            System.out.println("  Data files pending deletion (dry-run): " + wouldDelete.size());
+        if (!deletedPartitions.isEmpty()) {
+            System.out.println("  Empty partitions removed: " + deletedPartitions.size());
         }
     }
 }

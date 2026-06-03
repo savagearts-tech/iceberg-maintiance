@@ -66,6 +66,15 @@ public class IcebergMaintenanceCli {
                 return;
             }
 
+            S3Client s3 = buildS3Client(config);
+
+            if ("list-empty-tables".equals(command)) {
+                String warehouse = config.getProperty("warehouse");
+                new ListEmptyTablesCommand(catalog, tableFilter, warehouse, s3).execute();
+                s3.close();
+                return;
+            }
+
             boolean batchMode = allTables || (tableName == null && tableFilter.isRestrictive());
             if (tableName == null && !batchMode) {
                 System.err.println("Error: specify a table name, use --all, or set catalog filters.");
@@ -74,8 +83,6 @@ public class IcebergMaintenanceCli {
                 System.err.println("  java -jar iceberg-cli.jar expire --all --namespace alpha --table-prefix trace");
                 System.exit(1);
             }
-
-            S3Client s3 = buildS3Client(config);
 
             if (batchMode) {
                 List<TableIdentifier> tables = CatalogLister.listTables(catalog, tableFilter);
@@ -86,16 +93,14 @@ public class IcebergMaintenanceCli {
                 }
                 System.out.println("Processing " + tables.size() + " tables (parallelism=" + parallelism + ")...");
                 ParallelMaintenanceExecutor executor = new ParallelMaintenanceExecutor(parallelism);
-                org.apache.iceberg.catalog.TableIdentifier firstId = tables.getFirst();
                 String warehouse = config.getProperty("warehouse");
-                String dataPrefix = deriveDataPrefix(warehouse, firstId);
 
                 ParallelMaintenanceExecutor.BatchResult result = executor.executeAll(
                         tables, command,
                         id -> {
                             try {
                                 executeCommand(command, catalog, id,
-                                        deriveDataPrefix(warehouse, id), retention, coolingDays, s3, config);
+                                        deriveDataPrefix(warehouse, id), retention, coolingDays, s3, config, args);
                             } catch (Exception e) {
                                 throw new RuntimeException(e);
                             }
@@ -110,12 +115,16 @@ public class IcebergMaintenanceCli {
                         }
                     }
                 }
+                if ("cleanup".equals(command)) {
+                    System.out.println();
+                    new ListEmptyTablesCommand(catalog, tableFilter, warehouse, s3).execute();
+                }
             } else {
                 String warehouse = config.getProperty("warehouse");
                 String dataPrefix = config.getProperty("table.dataPrefix",
                         deriveDataPrefix(warehouse, TableIdentifier.parse(tableName)));
                 executeCommand(command, catalog, TableIdentifier.parse(tableName), dataPrefix,
-                        retention, coolingDays, s3, config);
+                        retention, coolingDays, s3, config, args);
             }
 
             s3.close();
@@ -151,16 +160,21 @@ public class IcebergMaintenanceCli {
 
     private static void executeCommand(String command, JdbcCatalog catalog, TableIdentifier tableId,
                                        String dataPrefix, RetentionConfig retention, int coolingDays,
-                                       S3Client s3, Properties config) throws Exception {
+                                       S3Client s3, Properties config, String[] args) throws Exception {
         Table table = catalog.loadTable(tableId);
         TableOperations tableOps = ((HasTableOperations) table).operations();
 
         boolean dryRun = Boolean.parseBoolean(config.getProperty("dryRun", "true"));
+        boolean purgeEmptyTables = containsFlag(args, "--purge-empty-tables")
+                || Boolean.parseBoolean(config.getProperty("purgeEmptyTables", "false"));
+        boolean dropCatalog = containsFlag(args, "--drop-catalog")
+                || Boolean.parseBoolean(config.getProperty("dropCatalog", "false"));
 
         switch (command) {
             case "expire" -> new ExpireCommand(table, retention, dryRun).execute();
             case "scan-orphans" -> new ScanOrphansCommand(table, tableOps, dataPrefix, s3).execute();
-            case "cleanup" -> new CleanupCommand(table, tableOps, dataPrefix, retention, s3, coolingDays, dryRun).execute();
+            case "cleanup" -> new CleanupCommand(table, tableOps, dataPrefix, retention, s3, coolingDays, dryRun,
+                    null, purgeEmptyTables, dropCatalog, catalog, tableId).execute();
             default -> printUsage();
         }
     }
@@ -217,7 +231,8 @@ public class IcebergMaintenanceCli {
                 "jdbc.url", "jdbc.driver", "jdbc.user", "jdbc.password",
                 "warehouse", "table.name", "table.dataPrefix",
                 "s3.region", "dryRun", "coolingPeriodDays",
-                "catalog.namespace", "catalog.tablePrefix", "catalog.tablePattern"
+                "catalog.namespace", "catalog.tablePrefix", "catalog.tablePattern",
+                "purgeEmptyTables", "dropCatalog"
         };
         for (String key : keys) {
             String val = System.getProperty(key);
@@ -241,23 +256,27 @@ public class IcebergMaintenanceCli {
                   java -jar iceberg-cli.jar <command> [table-name|--all] [options]
 
                 Commands:
-                  expire        Expire old snapshots (dual retention)
-                  scan-orphans  Scan for orphan (zombie) files
-                  cleanup       Delete orphan files with safety checks
-                  list-tables   List tables in the catalog
+                  expire              Expire old snapshots (dual retention)
+                  scan-orphans        Scan for orphan (zombie) files
+                  cleanup             Delete orphan files with safety checks
+                  list-tables         List tables in the catalog
+                  list-empty-tables   List tables with no data files (need table-level cleanup)
 
                 Examples:
                   java -jar iceberg-cli.jar expire my_db.my_table
                   java -jar iceberg-cli.jar expire --all
-                  java -jar iceberg-cli.jar expire --all --namespace alpha --table-prefix trace
-                  java -jar iceberg-cli.jar list-tables --namespace fds_db --table-pattern "fds_db\\.trace_.*"
+                  java -jar iceberg-cli.jar list-empty-tables --all
+                  java -jar iceberg-cli.jar cleanup --all --purge-empty-tables
+                  java -jar iceberg-cli.jar cleanup my_db.my_table --purge-empty-tables --drop-catalog
 
                 Options:
-                  --all              Process all tables (optionally narrowed by filters below)
-                  --parallelism N    Max concurrent tables (default: CPU core count)
-                  --namespace NS     Limit to namespace, e.g. alpha or a.b
-                  --table-prefix P   Table name prefix, e.g. trace_
-                  --table-pattern R  Regex on fully-qualified table name
+                  --all                    Process all tables (optionally narrowed by filters below)
+                  --parallelism N          Max concurrent tables (default: CPU core count)
+                  --namespace NS           Limit to namespace, e.g. alpha or a.b
+                  --table-prefix P         Table name prefix, e.g. trace_
+                  --table-pattern R        Regex on fully-qualified table name
+                  --purge-empty-tables     After cleanup, remove leftover storage for tables with no data
+                  --drop-catalog           With --purge-empty-tables, also drop the table from JDBC catalog
 
                 Configuration (system properties or env vars ICE_BERG_*):
                   jdbc.url              JDBC connection URL
@@ -273,6 +292,8 @@ public class IcebergMaintenanceCli {
                   s3.region             AWS region (default: us-east-1)
                   dryRun                true/false (default: true)
                   coolingPeriodDays     Cooling period in days (default: 3)
+                  purgeEmptyTables      true/false (default: false)
+                  dropCatalog           true/false (default: false)
                 """);
     }
 }

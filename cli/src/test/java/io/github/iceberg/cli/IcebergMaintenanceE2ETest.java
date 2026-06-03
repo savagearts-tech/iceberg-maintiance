@@ -235,6 +235,36 @@ class IcebergMaintenanceE2ETest {
         assertTrue(remainingOrphans.isEmpty(), "All data orphans should be gone after deletion");
     }
 
+    @Test
+    @Order(5)
+    @DisplayName("Remove empty partition directory after orphan data file deletion")
+    void deleteEmptyPartitionDirectory() {
+        String partitionKey = "e2e-test/e2e_db/e2e_tbl/data/event_date_day=99999/";
+        String orphanKey = partitionKey + "orphan-only.parquet";
+        createOrphanFile(orphanKey);
+        s3.putObject(PutObjectRequest.builder().bucket(BUCKET).key(partitionKey).build(),
+                RequestBody.empty());
+
+        L1LogicalExpiryScanner l1 = new L1LogicalExpiryScanner(new FileSetBuilder(table));
+        Set<String> referenced = l1.getReferencedFiles();
+        String orphanPath = "s3a://" + BUCKET + "/" + orphanKey;
+        String partitionPrefix = "s3a://" + BUCKET + "/" + partitionKey;
+
+        CoolingPeriodFilter noCooling = new CoolingPeriodFilter(0);
+        DirectoryGuard dirGuard = new DirectoryGuard();
+        PhysicalDeletionService delSvc = new PhysicalDeletionService(s3, noCooling, dirGuard);
+        List<String> deleted = delSvc.deleteOrphans(Set.of(orphanPath));
+        assertEquals(1, deleted.size());
+
+        EmptyPartitionCleaner partitionCleaner = new EmptyPartitionCleaner(s3, dirGuard, delSvc);
+        List<String> cleaned = partitionCleaner.deleteEmptyPartitions(
+                DATA_PREFIX, referenced, List.of(partitionPrefix), deleted);
+        assertTrue(cleaned.contains(partitionPrefix), "Should remove empty partition prefix");
+
+        assertThrows(NoSuchKeyException.class, () ->
+                s3.headObject(HeadObjectRequest.builder().bucket(BUCKET).key(partitionKey).build()));
+    }
+
     // ?????? helpers ??????
 
     private static void ensureBucketExists(String bucket) {
