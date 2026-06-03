@@ -27,6 +27,7 @@ replay_pid*
 #AI 目录
 openspec/
 .agent/
+.claude/
 .cursor/
 .mvn/
 .vscode/

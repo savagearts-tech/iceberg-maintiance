@@ -14,7 +14,8 @@ import java.util.stream.Collectors;
 /**
  * Executes Iceberg table maintenance tasks in parallel using a fixed thread pool.
  *
- * <p>Each table is submitted as a {@link CompletableFuture}. Failures are isolated â€? * an exception in one table does not affect others. Progress is reported periodically
+ * <p>Each table is submitted as a {@link CompletableFuture}. Failures are isolated -
+ * an exception in one table does not affect others. Progress is reported periodically
  * and a summary is produced on completion.
  */
 public class ParallelMaintenanceExecutor {

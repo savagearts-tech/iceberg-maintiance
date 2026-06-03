@@ -13,9 +13,12 @@ import org.apache.iceberg.jdbc.JdbcCatalog;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import software.amazon.awssdk.auth.credentials.DefaultCredentialsProvider;
+import software.amazon.awssdk.core.checksums.RequestChecksumCalculation;
+import software.amazon.awssdk.core.checksums.ResponseChecksumValidation;
+import software.amazon.awssdk.http.urlconnection.UrlConnectionHttpClient;
 import software.amazon.awssdk.regions.Region;
 import software.amazon.awssdk.services.s3.S3Client;
-import software.amazon.awssdk.http.urlconnection.UrlConnectionHttpClient;
+import software.amazon.awssdk.services.s3.LegacyMd5Plugin;
 
 import java.util.List;
 import java.util.Properties;
@@ -171,10 +174,14 @@ public class IcebergMaintenanceCli {
     }
 
     private static S3Client buildS3Client(Properties config) {
+        // LegacyMd5Plugin: DeleteObjects requires Content-MD5 on many S3-compatible stores (OSS, MinIO, COS).
         return S3Client.builder()
                 .region(Region.of(config.getProperty("s3.region", "us-east-1")))
                 .credentialsProvider(DefaultCredentialsProvider.create())
                 .httpClient(UrlConnectionHttpClient.builder().build())
+                .addPlugin(LegacyMd5Plugin.create())
+                .requestChecksumCalculation(RequestChecksumCalculation.WHEN_REQUIRED)
+                .responseChecksumValidation(ResponseChecksumValidation.WHEN_REQUIRED)
                 .build();
     }
 
