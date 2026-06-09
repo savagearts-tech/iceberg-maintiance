@@ -34,7 +34,7 @@ public class PartitionedTableScanner {
     private final Expression partitionFilter;
     private final PartitionPrefixGenerator prefixGenerator;
 
-    // cached scan result â€?avoids double planFiles() when both
+    // cached scan result ï¿½?avoids double planFiles() when both
     // scanDataFiles() and derivePrefixes() are called in a pipeline
     private ScanResult cachedResult;
 
@@ -134,7 +134,7 @@ public class PartitionedTableScanner {
 
     /**
      * Scans all data files referenced by active snapshots, optionally filtered.
-     * Results are cached â€?a second call returns the same set without re-scanning.
+     * Results are cached ï¿½?a second call returns the same set without re-scanning.
      *
      * @return all referenced data file paths, normalized to s3a://
      */
@@ -144,7 +144,7 @@ public class PartitionedTableScanner {
 
     /**
      * Parses {@code partitionToPath()} output into ordered value components.
-     * e.g. {@code year=2026/month=05/day=26} â†?{@code ["2026","05","26"]}
+     * e.g. {@code year=2026/month=05/day=26} ï¿½?{@code ["2026","05","26"]}
      */
     static List<String> parsePartitionPathValues(String partitionPath) {
         if (partitionPath == null || partitionPath.isBlank()) {
@@ -192,10 +192,11 @@ public class PartitionedTableScanner {
     }
 
     private TableScan buildScan() {
-        TableScan scan = table.newScan();
+        TableScan scan = table.newScan().ignoreResiduals().select(java.util.Collections.emptyList()).planWith(org.apache.iceberg.util.ThreadPools.getWorkerPool());
         if (partitionFilter != null) {
             scan = scan.filter(partitionFilter);
         }
         return scan;
     }
 }
+

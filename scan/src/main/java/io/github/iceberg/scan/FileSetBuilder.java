@@ -33,7 +33,11 @@ public class FileSetBuilder {
      */
     public Set<String> buildReferencedFileSet() {
         Set<String> files = new HashSet<>();
-        try (CloseableIterable<FileScanTask> tasks = table.newScan().planFiles()) {
+        try (CloseableIterable<FileScanTask> tasks = table.newScan()
+                .ignoreResiduals()
+                .select(java.util.Collections.emptyList())
+                .planWith(org.apache.iceberg.util.ThreadPools.getWorkerPool())
+                .planFiles()) {
             for (FileScanTask task : tasks) {
                 String path = task.file().path().toString();
                 files.add(UriNormalizer.normalize(path));
