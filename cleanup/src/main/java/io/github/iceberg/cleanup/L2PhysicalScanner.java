@@ -4,6 +4,7 @@ import io.github.iceberg.common.UriNormalizer;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import software.amazon.awssdk.services.s3.S3Client;
+import software.amazon.awssdk.services.s3.model.CommonPrefix;
 import software.amazon.awssdk.services.s3.model.ListObjectsV2Request;
 import software.amazon.awssdk.services.s3.model.ListObjectsV2Response;
 import software.amazon.awssdk.services.s3.model.S3Object;
@@ -14,11 +15,12 @@ import java.util.concurrent.*;
 import java.util.stream.Collectors;
 
 /**
- * L2 physical scanner â€?uses S3 {@code ListObjectsV2} with configurable prefixes
+ * L2 physical scanner uses S3 {@code ListObjectsV2} with configurable prefixes
  * and pagination to enumerate files on the storage backend.
  *
  * <p>Accepts partition-derived prefixes to narrow the scan scope to specific
- * partition directories. Supports parallel prefix scanning for efficiency.
+ * partition directories. Supports parallel prefix scanning and automatic
+ * sub-prefix discovery for efficiency.
  *
  * <p>Maintains an internal cache of {@code lastModified} timestamps from
  * ListObjects responses. Downstream components like {@link CoolingPeriodFilter}
@@ -28,7 +30,7 @@ public class L2PhysicalScanner {
 
     private static final Logger LOG = LoggerFactory.getLogger(L2PhysicalScanner.class);
 
-    private static final int DEFAULT_PARALLELISM = 4;
+    private static final int DEFAULT_PARALLELISM = 32;
     private static final long SCAN_TIMEOUT_MINUTES = 30;
 
     private final S3Client s3Client;
@@ -66,14 +68,23 @@ public class L2PhysicalScanner {
 
         Queue<String> results = new ConcurrentLinkedQueue<>();
 
-        if (relativePrefixes.size() == 1) {
-            listPrefix(bucket, relativePrefixes.getFirst(), results);
+        // 1. Dynamic Sub-Prefix Parallelization (expand if we don't have enough parallel tasks)
+        List<String> scanPrefixes = new ArrayList<>(relativePrefixes);
+        if (scanPrefixes.size() < parallelism) {
+            scanPrefixes = expandPrefixes(bucket, scanPrefixes, results);
+        }
+
+        // 2. Parallel Deep Scan
+        if (scanPrefixes.isEmpty()) {
+            LOG.info("All files were collected during expand phase.");
+        } else if (scanPrefixes.size() == 1) {
+            listPrefix(bucket, scanPrefixes.getFirst(), results);
         } else {
             ExecutorService executor = Executors.newFixedThreadPool(
-                    Math.min(parallelism, relativePrefixes.size()));
+                    Math.min(parallelism, scanPrefixes.size()));
             try {
                 List<Future<?>> futures = new ArrayList<>();
-                for (String prefix : relativePrefixes) {
+                for (String prefix : scanPrefixes) {
                     futures.add(executor.submit(() -> listPrefix(bucket, prefix, results)));
                 }
                 // Wait for all tasks and collect any errors
@@ -101,10 +112,62 @@ public class L2PhysicalScanner {
             }
         }
 
-        LOG.info("L2 physical scan complete: {} files from {} prefixes", results.size(), relativePrefixes.size());
+        LOG.info("L2 physical scan complete: {} files from {} initial prefixes", results.size(), relativePrefixes.size());
         return results.stream()
                 .map(p -> "s3a://" + bucket + "/" + p)
                 .collect(Collectors.toSet());
+    }
+
+    /**
+     * Attempts to dynamically discover subdirectories for better parallelization.
+     */
+    private List<String> expandPrefixes(String bucket, List<String> initialPrefixes, Queue<String> directResults) {
+        List<String> expanded = new ArrayList<>();
+        LOG.info("Expanding {} prefixes to improve parallelism...", initialPrefixes.size());
+
+        for (String prefix : initialPrefixes) {
+            String token = null;
+            boolean hasSubDirs = false;
+            boolean firstPage = true;
+
+            do {
+                ListObjectsV2Request.Builder reqBuilder = ListObjectsV2Request.builder()
+                        .bucket(bucket).prefix(prefix).delimiter("/");
+                if (token != null) reqBuilder.continuationToken(token);
+
+                ListObjectsV2Response resp = s3Client.listObjectsV2(reqBuilder.build());
+
+                if (firstPage) {
+                    hasSubDirs = resp.hasCommonPrefixes() && !resp.commonPrefixes().isEmpty();
+                    firstPage = false;
+                }
+
+                if (hasSubDirs) {
+                    // Collect files at this level (we don't want to scan this parent prefix again)
+                    for (S3Object obj : resp.contents()) {
+                        if (!obj.key().endsWith("/")) { // skip directory markers
+                            directResults.add(obj.key());
+                            lastModifiedCache.put("s3a://" + bucket + "/" + obj.key(), obj.lastModified());
+                        }
+                    }
+                    // Collect subdirectories to be deep-scanned later
+                    if (resp.hasCommonPrefixes()) {
+                        for (CommonPrefix cp : resp.commonPrefixes()) {
+                            expanded.add(cp.prefix());
+                        }
+                    }
+                    token = resp.nextContinuationToken();
+                } else {
+                    // No subdirectories found on the first page -> it's a flat directory.
+                    // Stop expanding this prefix to avoid sequentially paginating millions of files.
+                    expanded.add(prefix);
+                    token = null;
+                }
+            } while (token != null);
+        }
+
+        LOG.info("Expanded into {} sub-prefixes for parallel deep scanning.", expanded.size());
+        return expanded;
     }
 
     /**

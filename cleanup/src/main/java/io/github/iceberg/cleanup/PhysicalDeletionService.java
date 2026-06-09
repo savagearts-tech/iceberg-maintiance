@@ -10,9 +10,15 @@ import software.amazon.awssdk.services.s3.model.ObjectIdentifier;
 
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
 
 /**
@@ -20,6 +26,8 @@ import java.util.stream.Collectors;
  *
  * <p>Supports batched deletion and partial failure handling (S3's
  * {@code DeleteObjects} supports up to 1000 keys per request).
+ * This implementation utilizes an ExecutorService to send concurrent
+ * batch deletion requests.
  *
  * <p>Passes the L2 scanner's {@code lastModified} cache to
  * {@link CoolingPeriodFilter} to avoid redundant HEAD requests.
@@ -29,6 +37,8 @@ public class PhysicalDeletionService {
     private static final Logger LOG = LoggerFactory.getLogger(PhysicalDeletionService.class);
 
     private static final int BATCH_SIZE = 1000;
+    private static final int DEFAULT_PARALLELISM = 16;
+    private static final long DELETION_TIMEOUT_MINUTES = 60;
 
     private final S3Client s3Client;
     private final CoolingPeriodFilter coolingFilter;
@@ -83,23 +93,30 @@ public class PhysicalDeletionService {
                 })
                 .collect(Collectors.toSet());
 
-        // 3. Batch delete
+        // 3. Concurrent Batch delete
         String bucket = extractBucket(cooled);
         List<String> batch = new ArrayList<>();
-        List<String> deleted = new ArrayList<>();
-        List<String> failed = new ArrayList<>();
+        List<String> deleted = Collections.synchronizedList(new ArrayList<>());
+        List<String> failed = Collections.synchronizedList(new ArrayList<>());
+
+        ExecutorService executor = Executors.newFixedThreadPool(DEFAULT_PARALLELISM);
+        List<Future<?>> futures = new ArrayList<>();
 
         for (String path : cooled) {
             String key = extractKey(path);
             batch.add(key);
             if (batch.size() >= BATCH_SIZE) {
-                deleteBatch(bucket, batch, deleted, failed);
+                List<String> batchCopy = new ArrayList<>(batch);
+                futures.add(executor.submit(() -> deleteBatch(bucket, batchCopy, deleted, failed)));
                 batch.clear();
             }
         }
         if (!batch.isEmpty()) {
-            deleteBatch(bucket, batch, deleted, failed);
+            List<String> batchCopy = new ArrayList<>(batch);
+            futures.add(executor.submit(() -> deleteBatch(bucket, batchCopy, deleted, failed)));
         }
+
+        awaitFutures(executor, futures);
 
         LOG.info("Physical deletion complete: {} deleted, {} failed", deleted.size(), failed.size());
         return deleted;
@@ -112,20 +129,51 @@ public class PhysicalDeletionService {
         if (keys == null || keys.isEmpty()) {
             return List.of();
         }
-        List<String> deleted = new ArrayList<>();
-        List<String> failed = new ArrayList<>();
+        List<String> deleted = Collections.synchronizedList(new ArrayList<>());
+        List<String> failed = Collections.synchronizedList(new ArrayList<>());
         List<String> batch = new ArrayList<>();
+
+        ExecutorService executor = Executors.newFixedThreadPool(DEFAULT_PARALLELISM);
+        List<Future<?>> futures = new ArrayList<>();
+
         for (String key : keys) {
             batch.add(key);
             if (batch.size() >= BATCH_SIZE) {
-                deleteBatch(bucket, batch, deleted, failed);
+                List<String> batchCopy = new ArrayList<>(batch);
+                futures.add(executor.submit(() -> deleteBatch(bucket, batchCopy, deleted, failed)));
                 batch.clear();
             }
         }
         if (!batch.isEmpty()) {
-            deleteBatch(bucket, batch, deleted, failed);
+            List<String> batchCopy = new ArrayList<>(batch);
+            futures.add(executor.submit(() -> deleteBatch(bucket, batchCopy, deleted, failed)));
         }
+
+        awaitFutures(executor, futures);
         return deleted;
+    }
+
+    private void awaitFutures(ExecutorService executor, List<Future<?>> futures) {
+        for (Future<?> f : futures) {
+            try {
+                f.get();
+            } catch (ExecutionException e) {
+                LOG.error("Parallel deletion task failed", e.getCause());
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                LOG.warn("Deletion interrupted");
+                break;
+            }
+        }
+        executor.shutdown();
+        try {
+            if (!executor.awaitTermination(DELETION_TIMEOUT_MINUTES, TimeUnit.MINUTES)) {
+                executor.shutdownNow();
+            }
+        } catch (InterruptedException e) {
+            executor.shutdownNow();
+            Thread.currentThread().interrupt();
+        }
     }
 
     private void deleteBatch(String bucket, List<String> keys, List<String> deleted, List<String> failed) {
