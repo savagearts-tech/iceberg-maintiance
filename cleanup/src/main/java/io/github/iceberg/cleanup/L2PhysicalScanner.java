@@ -78,10 +78,12 @@ public class L2PhysicalScanner {
         if (scanPrefixes.isEmpty()) {
             LOG.info("All files were collected during expand phase.");
         } else if (scanPrefixes.size() == 1) {
+            LOG.info("Starting SINGLE-THREADED scan for 1 prefix...");
             listPrefix(bucket, scanPrefixes.getFirst(), results);
         } else {
-            ExecutorService executor = Executors.newFixedThreadPool(
-                    Math.min(parallelism, scanPrefixes.size()));
+            int activeThreads = Math.min(parallelism, scanPrefixes.size());
+            LOG.info("Starting PARALLEL scan for {} prefixes using {} threads...", scanPrefixes.size(), activeThreads);
+            ExecutorService executor = Executors.newFixedThreadPool(activeThreads);
             try {
                 List<Future<?>> futures = new ArrayList<>();
                 for (String prefix : scanPrefixes) {
