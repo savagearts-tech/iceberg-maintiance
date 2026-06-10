@@ -70,22 +70,28 @@ public class ParallelMaintenanceExecutor {
                         long elapsed = Duration.between(taskStart, Instant.now()).toMillis();
                         results.add(TableTaskResult.failure(tableName, command, elapsed, e.getMessage()));
                         LOG.warn("Table {} failed: {}", tableName, e.getMessage());
+                    } catch (Error e) {
+                        long elapsed = Duration.between(taskStart, Instant.now()).toMillis();
+                        results.add(TableTaskResult.failure(tableName, command, elapsed, e.getMessage()));
+                        LOG.error("Table {} encountered fatal error: {}", tableName, e.getMessage(), e);
+                        throw e;  // re-throw Error to propagate, but at least we recorded it
                     }
                 }, executor))
                 .toList();
 
-        // Wait for all tasks
-        CompletableFuture.allOf(futures.toArray(new CompletableFuture[0])).join();
-
-        // Shutdown executor
-        executor.shutdown();
+        // Wait for all tasks and ensure executor is always shut down
         try {
-            if (!executor.awaitTermination(30, TimeUnit.SECONDS)) {
+            CompletableFuture.allOf(futures.toArray(new CompletableFuture[0])).join();
+        } finally {
+            executor.shutdown();
+            try {
+                if (!executor.awaitTermination(30, TimeUnit.SECONDS)) {
+                    executor.shutdownNow();
+                }
+            } catch (InterruptedException e) {
                 executor.shutdownNow();
+                Thread.currentThread().interrupt();
             }
-        } catch (InterruptedException e) {
-            executor.shutdownNow();
-            Thread.currentThread().interrupt();
         }
 
         long wallClockMs = Duration.between(start, Instant.now()).toMillis();
