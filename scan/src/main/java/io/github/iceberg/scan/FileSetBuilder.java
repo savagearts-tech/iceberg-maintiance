@@ -43,7 +43,8 @@ public class FileSetBuilder {
                 files.add(UriNormalizer.normalize(path));
             }
         } catch (Exception e) {
-            LOG.warn("Failed to scan table files", e);
+            LOG.error("Failed to scan table files - aborting to prevent false orphan detection", e);
+            throw new RuntimeException("Failed to scan table files for " + table.name(), e);
         }
 
         LOG.info("Built referenced file set: {} files from metadata scan", files.size());

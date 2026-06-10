@@ -11,6 +11,10 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.util.*;
+import java.nio.charset.StandardCharsets;
+import org.apache.iceberg.Snapshot;
+import org.apache.iceberg.ManifestFile;
+import org.apache.iceberg.ManifestFiles;
 
 /**
  * Scans Iceberg table metadata with configurable partition filter predicates.
@@ -139,7 +143,37 @@ public class PartitionedTableScanner {
      * @return all referenced data file paths, normalized to s3a://
      */
     public Set<String> scanDataFiles() {
-        return getOrScan().referencedFiles();
+        Set<String> filter = new HashSet<>();
+
+        int manifestCount = 0;
+        for (Snapshot snapshot : table.snapshots()) {
+            if (snapshot.dataManifests(table.io()) != null) {
+                for (ManifestFile manifest : snapshot.dataManifests(table.io())) {
+                    manifestCount++;
+                    try (CloseableIterable<String> paths = ManifestFiles.readPaths(manifest, table.io())) {
+                        for (String path : paths) {
+                            filter.add(UriNormalizer.normalize(path));
+                        }
+                    } catch (java.io.IOException e) {
+                        LOG.warn("Failed to read data manifest {}", manifest.path(), e);
+                    }
+                }
+            }
+            if (snapshot.deleteManifests(table.io()) != null) {
+                for (ManifestFile manifest : snapshot.deleteManifests(table.io())) {
+                    manifestCount++;
+                    try (CloseableIterable<String> paths = ManifestFiles.readPaths(manifest, table.io())) {
+                        for (String path : paths) {
+                            filter.add(UriNormalizer.normalize(path));
+                        }
+                    } catch (java.io.IOException e) {
+                        LOG.warn("Failed to read delete manifest {}", manifest.path(), e);
+                    }
+                }
+            }
+        }
+        LOG.info("Built referenced files BloomFilter from {} manifests across all active snapshots.", manifestCount);
+        return filter;
     }
 
     /**
@@ -180,7 +214,8 @@ public class PartitionedTableScanner {
                 }
             }
         } catch (Exception e) {
-            LOG.warn("Failed to scan table {}", table.name(), e);
+            LOG.error("Failed to scan table {} - aborting to prevent false orphan detection", table.name(), e);
+            throw new RuntimeException("Failed to scan table " + table.name(), e);
         }
 
         cachedResult = new ScanResult(
