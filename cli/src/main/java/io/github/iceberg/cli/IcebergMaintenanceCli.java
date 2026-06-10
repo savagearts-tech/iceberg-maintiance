@@ -15,7 +15,7 @@ import org.slf4j.LoggerFactory;
 import software.amazon.awssdk.auth.credentials.DefaultCredentialsProvider;
 import software.amazon.awssdk.core.checksums.RequestChecksumCalculation;
 import software.amazon.awssdk.core.checksums.ResponseChecksumValidation;
-import software.amazon.awssdk.http.urlconnection.UrlConnectionHttpClient;
+import software.amazon.awssdk.http.apache.ApacheHttpClient;
 import software.amazon.awssdk.regions.Region;
 import software.amazon.awssdk.services.s3.S3Client;
 import software.amazon.awssdk.services.s3.LegacyMd5Plugin;
@@ -51,8 +51,7 @@ public class IcebergMaintenanceCli {
             tableName = config.getProperty("table.name", null);
         }
 
-        try {
-            JdbcCatalog catalog = new JdbcCatalogConfig(config).createCatalog();
+        try (JdbcCatalog catalog = new JdbcCatalogConfig(config).createCatalog()) {
             RetentionConfig retention = RetentionConfig.defaults();
             int coolingDays = Integer.parseInt(config.getProperty("coolingPeriodDays",
                     String.valueOf(RetentionConfig.DEFAULT_COOLING_PERIOD_DAYS)));
@@ -66,68 +65,65 @@ public class IcebergMaintenanceCli {
                 return;
             }
 
-            S3Client s3 = buildS3Client(config);
+            try (S3Client s3 = buildS3Client(config)) {
 
-            if ("list-empty-tables".equals(command)) {
-                String warehouse = config.getProperty("warehouse");
-                new ListEmptyTablesCommand(catalog, tableFilter, warehouse, s3).execute();
-                s3.close();
-                return;
-            }
-
-            boolean batchMode = allTables || (tableName == null && tableFilter.isRestrictive());
-            if (tableName == null && !batchMode) {
-                System.err.println("Error: specify a table name, use --all, or set catalog filters.");
-                System.err.println("  java -jar iceberg-cli.jar expire my_db.my_table");
-                System.err.println("  java -jar iceberg-cli.jar expire --all");
-                System.err.println("  java -jar iceberg-cli.jar expire --all --namespace alpha --table-prefix trace");
-                System.exit(1);
-            }
-
-            if (batchMode) {
-                List<TableIdentifier> tables = CatalogLister.listTables(catalog, tableFilter);
-                if (tables.isEmpty()) {
-                    System.out.println("No tables matched the catalog filter.");
-                    s3.close();
+                if ("list-empty-tables".equals(command)) {
+                    String warehouse = config.getProperty("warehouse");
+                    new ListEmptyTablesCommand(catalog, tableFilter, warehouse, s3).execute();
                     return;
                 }
-                System.out.println("Processing " + tables.size() + " tables (parallelism=" + parallelism + ")...");
-                ParallelMaintenanceExecutor executor = new ParallelMaintenanceExecutor(parallelism);
-                String warehouse = config.getProperty("warehouse");
 
-                ParallelMaintenanceExecutor.BatchResult result = executor.executeAll(
-                        tables, command,
-                        id -> {
-                            try {
-                                executeCommand(command, catalog, id,
-                                        deriveDataPrefix(warehouse, id), retention, coolingDays, s3, config, args);
-                            } catch (Exception e) {
-                                throw new RuntimeException(e);
+                boolean batchMode = allTables || (tableName == null && tableFilter.isRestrictive());
+                if (tableName == null && !batchMode) {
+                    System.err.println("Error: specify a table name, use --all, or set catalog filters.");
+                    System.err.println("  java -jar iceberg-cli.jar expire my_db.my_table");
+                    System.err.println("  java -jar iceberg-cli.jar expire --all");
+                    System.err.println("  java -jar iceberg-cli.jar expire --all --namespace alpha --table-prefix trace");
+                    System.exit(1);
+                }
+
+                if (batchMode) {
+                    List<TableIdentifier> tables = CatalogLister.listTables(catalog, tableFilter);
+                    if (tables.isEmpty()) {
+                        System.out.println("No tables matched the catalog filter.");
+                        return;
+                    }
+                    System.out.println("Processing " + tables.size() + " tables (parallelism=" + parallelism + ")...");
+                    ParallelMaintenanceExecutor executor = new ParallelMaintenanceExecutor(parallelism);
+                    String warehouse = config.getProperty("warehouse");
+
+                    ParallelMaintenanceExecutor.BatchResult result = executor.executeAll(
+                            tables, command,
+                            id -> {
+                                try {
+                                    executeCommand(command, catalog, id,
+                                            deriveDataPrefix(warehouse, id), retention, coolingDays, s3, config, args);
+                                } catch (Exception e) {
+                                    throw new RuntimeException(e);
+                                }
+                            });
+
+                    System.out.println(result.summary());
+                    if (result.failed() > 0) {
+                        System.err.println("Failed tables:");
+                        for (var r : result.results()) {
+                            if (!r.success()) {
+                                System.err.println("  " + r.tableName() + ": " + r.errorMessage());
                             }
-                        });
-
-                System.out.println(result.summary());
-                if (result.failed() > 0) {
-                    System.err.println("Failed tables:");
-                    for (var r : result.results()) {
-                        if (!r.success()) {
-                            System.err.println("  " + r.tableName() + ": " + r.errorMessage());
                         }
                     }
+                    if ("cleanup".equals(command)) {
+                        System.out.println();
+                        new ListEmptyTablesCommand(catalog, tableFilter, warehouse, s3).execute();
+                    }
+                } else {
+                    String warehouse = config.getProperty("warehouse");
+                    String dataPrefix = config.getProperty("table.dataPrefix",
+                            deriveDataPrefix(warehouse, TableIdentifier.parse(tableName)));
+                    executeCommand(command, catalog, TableIdentifier.parse(tableName), dataPrefix,
+                            retention, coolingDays, s3, config, args);
                 }
-                if ("cleanup".equals(command)) {
-                    System.out.println();
-                    new ListEmptyTablesCommand(catalog, tableFilter, warehouse, s3).execute();
-                }
-            } else {
-                String warehouse = config.getProperty("warehouse");
-                String dataPrefix = config.getProperty("table.dataPrefix",
-                        deriveDataPrefix(warehouse, TableIdentifier.parse(tableName)));
-                executeCommand(command, catalog, TableIdentifier.parse(tableName), dataPrefix,
-                        retention, coolingDays, s3, config, args);
             }
-
-            s3.close();
 
         } catch (Exception e) {
             LOG.error("Command failed: {}", command, e);
@@ -169,12 +165,23 @@ public class IcebergMaintenanceCli {
                 || Boolean.parseBoolean(config.getProperty("purgeEmptyTables", "false"));
         boolean dropCatalog = containsFlag(args, "--drop-catalog")
                 || Boolean.parseBoolean(config.getProperty("dropCatalog", "false"));
+        boolean metadataOnly = containsFlag(args, "--metadata-only")
+                || Boolean.parseBoolean(config.getProperty("metadataOnly", "false"));
+
+        String scanWindowHoursStr = getFlagValue(args, "--time-scan-window-hours");
+        List<String> explicitDataPrefixes = null;
+        if (scanWindowHoursStr != null && !metadataOnly) {
+            int scanWindowHours = Integer.parseInt(scanWindowHoursStr);
+            io.github.iceberg.cleanup.scan.TimeWindowPrefixGenerator generator = 
+                new io.github.iceberg.cleanup.scan.TimeWindowPrefixGenerator(table, dataPrefix);
+            explicitDataPrefixes = generator.generate(coolingDays, scanWindowHours);
+        }
 
         switch (command) {
             case "expire" -> new ExpireCommand(table, retention, dryRun).execute();
-            case "scan-orphans" -> new ScanOrphansCommand(table, tableOps, dataPrefix, s3).execute();
+            case "scan-orphans" -> new ScanOrphansCommand(table, tableOps, dataPrefix, s3, null, explicitDataPrefixes, metadataOnly).execute();
             case "cleanup" -> new CleanupCommand(table, tableOps, dataPrefix, retention, s3, coolingDays, dryRun,
-                    null, purgeEmptyTables, dropCatalog, catalog, tableId).execute();
+                    null, purgeEmptyTables, dropCatalog, catalog, tableId, explicitDataPrefixes, metadataOnly).execute();
             default -> printUsage();
         }
     }
@@ -192,7 +199,7 @@ public class IcebergMaintenanceCli {
         return S3Client.builder()
                 .region(Region.of(config.getProperty("s3.region", "us-east-1")))
                 .credentialsProvider(DefaultCredentialsProvider.create())
-                .httpClient(UrlConnectionHttpClient.builder().build())
+                .httpClient(ApacheHttpClient.builder().maxConnections(100).build())
                 .addPlugin(LegacyMd5Plugin.create())
                 .requestChecksumCalculation(RequestChecksumCalculation.WHEN_REQUIRED)
                 .responseChecksumValidation(ResponseChecksumValidation.WHEN_REQUIRED)
@@ -267,7 +274,7 @@ public class IcebergMaintenanceCli {
                   java -jar iceberg-cli.jar expire --all
                   java -jar iceberg-cli.jar list-empty-tables --all
                   java -jar iceberg-cli.jar cleanup --all --purge-empty-tables
-                  java -jar iceberg-cli.jar cleanup my_db.my_table --purge-empty-tables --drop-catalog
+                  java -jar iceberg-cli.jar cleanup my_db.my_table --metadata-only
 
                 Options:
                   --all                    Process all tables (optionally narrowed by filters below)
@@ -275,6 +282,8 @@ public class IcebergMaintenanceCli {
                   --namespace NS           Limit to namespace, e.g. alpha or a.b
                   --table-prefix P         Table name prefix, e.g. trace_
                   --table-pattern R        Regex on fully-qualified table name
+                  --time-scan-window-hours Auto-generate targeted S3 prefixes for L2 scan (e.g. 24)
+                  --metadata-only          Surgical mode: skips data files, only scans and cleans metadata files
                   --purge-empty-tables     After cleanup, remove leftover storage for tables with no data
                   --drop-catalog           With --purge-empty-tables, also drop the table from JDBC catalog
 
@@ -292,6 +301,7 @@ public class IcebergMaintenanceCli {
                   s3.region             AWS region (default: us-east-1)
                   dryRun                true/false (default: true)
                   coolingPeriodDays     Cooling period in days (default: 3)
+                  metadataOnly          true/false (default: false)
                   purgeEmptyTables      true/false (default: false)
                   dropCatalog           true/false (default: false)
                 """);
