@@ -145,34 +145,38 @@ public class PartitionedTableScanner {
     public Set<String> scanDataFiles() {
         Set<String> filter = new HashSet<>();
 
+        Snapshot current = table.currentSnapshot();
+        if (current == null) {
+            LOG.warn("Table {} has no current snapshot; no files to scan", table.name());
+            return filter;
+        }
+
         int manifestCount = 0;
-        for (Snapshot snapshot : table.snapshots()) {
-            if (snapshot.dataManifests(table.io()) != null) {
-                for (ManifestFile manifest : snapshot.dataManifests(table.io())) {
-                    manifestCount++;
-                    try (CloseableIterable<String> paths = ManifestFiles.readPaths(manifest, table.io())) {
-                        for (String path : paths) {
-                            filter.add(UriNormalizer.normalize(path));
-                        }
-                    } catch (java.io.IOException e) {
-                        LOG.warn("Failed to read data manifest {}", manifest.path(), e);
+        if (current.dataManifests(table.io()) != null) {
+            for (ManifestFile manifest : current.dataManifests(table.io())) {
+                manifestCount++;
+                try (CloseableIterable<String> paths = ManifestFiles.readPaths(manifest, table.io())) {
+                    for (String path : paths) {
+                        filter.add(UriNormalizer.normalize(path));
                     }
-                }
-            }
-            if (snapshot.deleteManifests(table.io()) != null) {
-                for (ManifestFile manifest : snapshot.deleteManifests(table.io())) {
-                    manifestCount++;
-                    try (CloseableIterable<String> paths = ManifestFiles.readPaths(manifest, table.io())) {
-                        for (String path : paths) {
-                            filter.add(UriNormalizer.normalize(path));
-                        }
-                    } catch (java.io.IOException e) {
-                        LOG.warn("Failed to read delete manifest {}", manifest.path(), e);
-                    }
+                } catch (java.io.IOException e) {
+                    LOG.warn("Failed to read data manifest {}", manifest.path(), e);
                 }
             }
         }
-        LOG.info("Built referenced files BloomFilter from {} manifests across all active snapshots.", manifestCount);
+        if (current.deleteManifests(table.io()) != null) {
+            for (ManifestFile manifest : current.deleteManifests(table.io())) {
+                manifestCount++;
+                try (CloseableIterable<String> paths = ManifestFiles.readPaths(manifest, table.io())) {
+                    for (String path : paths) {
+                        filter.add(UriNormalizer.normalize(path));
+                    }
+                } catch (java.io.IOException e) {
+                    LOG.warn("Failed to read delete manifest {}", manifest.path(), e);
+                }
+            }
+        }
+        LOG.info("Built referenced files BloomFilter from {} manifests from current snapshot.", manifestCount);
         return filter;
     }
 

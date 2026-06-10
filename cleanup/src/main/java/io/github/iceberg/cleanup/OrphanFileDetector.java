@@ -30,18 +30,17 @@ public class OrphanFileDetector {
      * @return orphan file paths that exist in storage but not in metadata
      */
     public Set<String> detectDataOrphans(Set<String> physicalFiles, Set<String> referencedFiles) {
-        Set<String> normalizedReferenced = referencedFiles.stream()
-                .map(UriNormalizer::normalize)
-                .collect(Collectors.toSet());
-
+        if (referencedFiles == null) {
+            throw new IllegalArgumentException("referencedFiles must not be null — null would treat all files as orphans");
+        }
         Set<String> orphans = physicalFiles.stream()
                 .filter(p -> p.contains(DATA_PREFIX))
                 .map(UriNormalizer::normalize)
-                .filter(p -> !normalizedReferenced.contains(p))
+                .filter(p -> !referencedFiles.contains(p))
                 .collect(Collectors.toSet());
 
-        LOG.info("Data orphan detection: {} orphans from {} physical files ({} referenced)",
-                orphans.size(), physicalFiles.size(), normalizedReferenced.size());
+        LOG.info("Data orphan detection: {} orphans from {} physical files",
+                orphans.size(), physicalFiles.size());
         return orphans;
     }
 

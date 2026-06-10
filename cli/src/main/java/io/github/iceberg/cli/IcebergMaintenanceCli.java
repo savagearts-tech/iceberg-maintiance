@@ -23,6 +23,7 @@ import software.amazon.awssdk.services.s3.LegacyMd5Plugin;
 import java.net.URI;
 import java.util.List;
 import java.util.Properties;
+import java.util.Set;
 
 /**
  * Main entry point for the Iceberg maintenance CLI.
@@ -41,7 +42,7 @@ public class IcebergMaintenanceCli {
         }
 
         String command = args[0];
-        String tableName = args.length > 1 && !args[1].startsWith("--") ? args[1] : null;
+        String tableName = resolveTableName(args);
         boolean allTables = containsFlag(args, "--all");
         int parallelism = parseParallelism(args);
 
@@ -238,6 +239,26 @@ public class IcebergMaintenanceCli {
             if (args[i].equals(flag)) {
                 return args[i + 1];
             }
+        }
+        return null;
+    }
+
+    /**
+     * Resolves the table name from CLI arguments. The table name is the first
+     * positional argument (non-flag, non-flag-value) after the command.
+     */
+    private static String resolveTableName(String[] args) {
+        Set<String> flagKeys = Set.of("--namespace", "--table-prefix", "--table-pattern",
+                "--parallelism", "--time-scan-window-hours");
+        for (int i = 1; i < args.length; i++) {
+            if (args[i].startsWith("--")) {
+                if (flagKeys.contains(args[i])) {
+                    i++; // skip flag value
+                }
+                continue;
+            }
+            // This is a positional argument — treat as table name
+            return args[i];
         }
         return null;
     }

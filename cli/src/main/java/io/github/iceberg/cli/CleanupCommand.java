@@ -156,8 +156,7 @@ public class CleanupCommand {
     private void handleEmptyTable(OrphanScanPipeline.Result scan,
                                   PhysicalDeletionService deletionService,
                                   DirectoryGuard dirGuard) {
-        L2PhysicalScanner rescanner = new L2PhysicalScanner(s3Client);
-        Set<String> physicalAfter = rescanner.listFiles(scan.prefixes());
+        Set<String> physicalAfter = scan.l2Scanner().listFiles(scan.prefixes());
         EmptyTableAnalyzer.Assessment assessment = EmptyTableAnalyzer.analyze(
                 tableDataPrefix, scan.referencedFiles(), physicalAfter);
 
