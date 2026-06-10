@@ -48,11 +48,11 @@ public class CoolingPeriodFilter {
                 String key = L2PhysicalScanner.extractKey(s3Path);
                 lastModified = s3Client.headObject(
                         HeadObjectRequest.builder().bucket(bucket).key(key).build()).lastModified();
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
-                LOG.warn("Interrupted while checking lastModified for {}: {}", s3Path, e.getMessage());
-                return false;
             } catch (Exception e) {
+                if (Thread.currentThread().isInterrupted()) {
+                    LOG.warn("Interrupted while checking lastModified for {}: {}", s3Path, e.getMessage());
+                    return false;
+                }
                 LOG.warn("Failed to check lastModified for {}: {}", s3Path, e.getMessage());
                 return false;
             }
