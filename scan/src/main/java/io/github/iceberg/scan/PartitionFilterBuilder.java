@@ -31,7 +31,7 @@ public final class PartitionFilterBuilder {
      * Example: {@code partitionDays=30} on May 26 produces
      * {@code event_date &lt; 2026-04-26}, returning only partitions before April 26.
      *
-     * @param partitionDays  number of days to look back; â‰?0 means no filter
+     * @param partitionDays  number of days to look back; ï¿½?0 means no filter
      */
     public static Expression build(Table table, int partitionDays) {
         if (partitionDays <= 0) {
@@ -61,8 +61,13 @@ public final class PartitionFilterBuilder {
         if (type instanceof Types.DateType) {
             return Expressions.lessThan(column, cutoff.toEpochDay());
         }
-        if (type instanceof Types.TimestampType || type instanceof Types.TimestampNanoType) {
-            return Expressions.lessThan(column, cutoff.atStartOfDay().toInstant(java.time.ZoneOffset.UTC).toEpochMilli() * 1000L);
+        if (type instanceof Types.TimestampType) {
+            return Expressions.lessThan(column, cutoff.atStartOfDay()
+                    .toInstant(java.time.ZoneOffset.UTC).toEpochMilli() * 1000L);
+        }
+        if (type instanceof Types.TimestampNanoType) {
+            return Expressions.lessThan(column, cutoff.atStartOfDay()
+                    .toInstant(java.time.ZoneOffset.UTC).toEpochMilli() * 1_000_000L);
         }
         if (type instanceof Types.StringType) {
             return Expressions.lessThan(column, cutoff.toString());

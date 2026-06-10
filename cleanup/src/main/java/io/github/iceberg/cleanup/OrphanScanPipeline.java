@@ -33,10 +33,34 @@ public class OrphanScanPipeline {
                           String tableDataPrefix,
                           S3Client s3Client,
                           Expression partitionFilter) {
-        PartitionedTableScanner scanner = new PartitionedTableScanner(table, partitionFilter, tableDataPrefix);
-        Set<String> referencedFiles = scanner.scanDataFiles();
+        return execute(table, tableOperations, tableDataPrefix, s3Client, partitionFilter, List.of(), false);
+    }
 
-        List<String> prefixes = new ArrayList<>(scanner.derivePrefixes());
+    public Result execute(Table table,
+                          TableOperations tableOperations,
+                          String tableDataPrefix,
+                          S3Client s3Client,
+                          Expression partitionFilter,
+                          List<String> explicitDataPrefixes,
+                          boolean metadataOnly) {
+        
+        Set<String> referencedFiles = null;
+        List<String> prefixes = new ArrayList<>();
+
+        if (!metadataOnly) {
+            PartitionedTableScanner scanner = new PartitionedTableScanner(table, partitionFilter, tableDataPrefix);
+            referencedFiles = scanner.scanDataFiles();
+
+            if (explicitDataPrefixes != null && !explicitDataPrefixes.isEmpty()) {
+                prefixes.addAll(explicitDataPrefixes);
+                LOG.info("Using {} explicit data prefixes for L2 scan", explicitDataPrefixes.size());
+            } else {
+                prefixes.addAll(scanner.derivePrefixes());
+            }
+        } else {
+            LOG.info("Metadata-only mode enabled. Skipping data file scan and L2 data prefixes.");
+        }
+
         String metaPrefix = metadataPrefix(tableDataPrefix);
         prefixes.add(metaPrefix);
 
@@ -44,7 +68,10 @@ public class OrphanScanPipeline {
         Set<String> physicalFiles = l2Scanner.listFiles(prefixes);
 
         OrphanFileDetector detector = new OrphanFileDetector();
-        Set<String> dataOrphans = detector.detectDataOrphans(physicalFiles, referencedFiles);
+        Set<String> dataOrphans = Set.of();
+        if (!metadataOnly) {
+            dataOrphans = detector.detectDataOrphans(physicalFiles, referencedFiles);
+        }
 
         MetadataReferenceChainWalker chainWalker =
                 new MetadataReferenceChainWalker(table, tableOperations);
@@ -59,10 +86,14 @@ public class OrphanScanPipeline {
     }
 
     static String metadataPrefix(String tableDataPrefix) {
-        String metaPrefix = tableDataPrefix.replace("/data", "/metadata");
-        if (!metaPrefix.endsWith("/")) {
-            metaPrefix += "/";
-        }
-        return metaPrefix;
+        // The data prefix always ends with "/data" or "/data/".
+        // Only replace the trailing "/data" segment to avoid corrupting
+        // paths that contain "data" in database/table names.
+        String base = tableDataPrefix.endsWith("/data/")
+                ? tableDataPrefix.substring(0, tableDataPrefix.length() - "data/".length())
+                : tableDataPrefix.endsWith("/data")
+                        ? tableDataPrefix.substring(0, tableDataPrefix.length() - "data".length())
+                        : tableDataPrefix;
+        return base + "metadata/";
     }
 }

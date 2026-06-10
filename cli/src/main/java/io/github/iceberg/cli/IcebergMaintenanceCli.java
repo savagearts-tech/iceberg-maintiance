@@ -20,6 +20,7 @@ import software.amazon.awssdk.regions.Region;
 import software.amazon.awssdk.services.s3.S3Client;
 import software.amazon.awssdk.services.s3.LegacyMd5Plugin;
 
+import java.net.URI;
 import java.util.List;
 import java.util.Properties;
 
@@ -196,14 +197,23 @@ public class IcebergMaintenanceCli {
 
     private static S3Client buildS3Client(Properties config) {
         // LegacyMd5Plugin: DeleteObjects requires Content-MD5 on many S3-compatible stores (OSS, MinIO, COS).
-        return S3Client.builder()
+        var builder = S3Client.builder()
                 .region(Region.of(config.getProperty("s3.region", "us-east-1")))
                 .credentialsProvider(DefaultCredentialsProvider.create())
                 .httpClient(ApacheHttpClient.builder().maxConnections(100).build())
                 .addPlugin(LegacyMd5Plugin.create())
                 .requestChecksumCalculation(RequestChecksumCalculation.WHEN_REQUIRED)
-                .responseChecksumValidation(ResponseChecksumValidation.WHEN_REQUIRED)
-                .build();
+                .responseChecksumValidation(ResponseChecksumValidation.WHEN_REQUIRED);
+
+        String endpoint = config.getProperty("s3.endpoint");
+        if (endpoint != null && !endpoint.isBlank()) {
+            builder.endpointOverride(URI.create(endpoint));
+        }
+
+        boolean pathStyle = Boolean.parseBoolean(config.getProperty("s3.pathStyleAccess", "true"));
+        builder.forcePathStyle(pathStyle);
+
+        return builder.build();
     }
 
     private static boolean containsFlag(String[] args, String flag) {
@@ -237,7 +247,7 @@ public class IcebergMaintenanceCli {
         String[] keys = {
                 "jdbc.url", "jdbc.driver", "jdbc.user", "jdbc.password",
                 "warehouse", "table.name", "table.dataPrefix",
-                "s3.region", "dryRun", "coolingPeriodDays",
+                "s3.region", "s3.endpoint", "s3.pathStyleAccess", "dryRun", "coolingPeriodDays",
                 "catalog.namespace", "catalog.tablePrefix", "catalog.tablePattern",
                 "purgeEmptyTables", "dropCatalog"
         };
@@ -299,6 +309,8 @@ public class IcebergMaintenanceCli {
                   catalog.tablePrefix   Same as --table-prefix
                   catalog.tablePattern  Same as --table-pattern
                   s3.region             AWS region (default: us-east-1)
+                  s3.endpoint           S3-compatible endpoint URL (e.g. http://localhost:9000 for MinIO)
+                  s3.pathStyleAccess    Use path-style addressing (default: true, required for MinIO/OSS/COS)
                   dryRun                true/false (default: true)
                   coolingPeriodDays     Cooling period in days (default: 3)
                   metadataOnly          true/false (default: false)
