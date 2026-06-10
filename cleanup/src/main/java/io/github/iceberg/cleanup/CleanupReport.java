@@ -30,7 +30,7 @@ public record CleanupReport(
     public String summary() {
         return String.format(
                 """
-                Cleanup Report â€?%s
+                Cleanup Report: %s
                   Table:          %s
                   Snapshots expired: %d
                   Data files deleted: %d

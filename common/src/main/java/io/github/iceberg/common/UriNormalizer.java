@@ -30,7 +30,7 @@ public class UriNormalizer {
         if (trimmed.startsWith("s3a://")) {
             return trimmed;
         }
-        // bare path â€?no protocol prefix
+        // bare path ï¿½?no protocol prefix
         return "s3a://" + trimmed;
     }
 
@@ -52,6 +52,7 @@ public class UriNormalizer {
     public static String extractKey(String s3Uri) {
         URI uri = URI.create(normalize(s3Uri));
         String path = uri.getPath();
+        if (path == null) return "";
         return path.startsWith("/") ? path.substring(1) : path;
     }
 }

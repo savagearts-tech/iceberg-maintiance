@@ -42,12 +42,16 @@ public class CoolingPeriodFilter {
         Instant lastModified = lastModifiedCache != null ? lastModifiedCache.get(s3Path) : null;
 
         if (lastModified == null) {
-            // Fallback: HEAD request (slower â€?happens for files not captured in L2 scan)
+            // Fallback: HEAD request (slower ï¿½?happens for files not captured in L2 scan)
             try {
                 String bucket = L2PhysicalScanner.extractBucket(s3Path);
                 String key = L2PhysicalScanner.extractKey(s3Path);
                 lastModified = s3Client.headObject(
                         HeadObjectRequest.builder().bucket(bucket).key(key).build()).lastModified();
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                LOG.warn("Interrupted while checking lastModified for {}: {}", s3Path, e.getMessage());
+                return false;
             } catch (Exception e) {
                 LOG.warn("Failed to check lastModified for {}: {}", s3Path, e.getMessage());
                 return false;
@@ -63,7 +67,7 @@ public class CoolingPeriodFilter {
     }
 
     /**
-     * Legacy path â€?performs a HEAD request for every file.
+     * Legacy path ï¿½?performs a HEAD request for every file.
      */
     public boolean isEligible(String s3Path, S3Client s3Client) {
         return isEligible(s3Path, s3Client, null);

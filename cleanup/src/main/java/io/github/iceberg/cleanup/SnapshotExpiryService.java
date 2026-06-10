@@ -60,6 +60,9 @@ public class SnapshotExpiryService {
                     .retainLast(config.retainLast())
                     .cleanExpiredFiles(false);
             expire.commit();
+            // Note: reported expiredIds is a best-effort estimate computed before commit.
+            // Iceberg's retainLast may protect some IDs during commit, so actual expired
+            // set may differ. This is acceptable for operational reporting.
         }
 
         long remainingCount = StreamSupport.stream(table.snapshots().spliterator(), false).count();
