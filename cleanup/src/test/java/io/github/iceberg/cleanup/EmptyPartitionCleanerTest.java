@@ -29,17 +29,15 @@ class EmptyPartitionCleanerTest {
     }
 
     @Test
-    void hasReferencedDataFile_detectsFileUnderPrefix() {
-        Set<String> referenced = Set.of(
-                "s3a://bucket/db/tbl/data/event_date_day=20597/part-00001.parquet");
+    void hasReferencedDataFile_trueWhenPartitionMatches() {
+        Set<String> referenced = Set.of("s3a://bucket/db/tbl/data/event_date_day=20597/part-00001.parquet");
         assertTrue(EmptyPartitionCleaner.hasReferencedDataFile(
                 DATA_ROOT + "event_date_day=20597/", referenced));
     }
 
     @Test
     void hasReferencedDataFile_falseWhenPartitionEmpty() {
-        Set<String> referenced = Set.of(
-                "s3a://bucket/db/tbl/data/event_date_day=20596/part-00001.parquet");
+        Set<String> referenced = Set.of("s3a://bucket/db/tbl/data/event_date_day=20596/part-00001.parquet");
         assertFalse(EmptyPartitionCleaner.hasReferencedDataFile(
                 DATA_ROOT + "event_date_day=20597/", referenced));
     }

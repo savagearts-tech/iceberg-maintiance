@@ -82,8 +82,8 @@ public class L2PhysicalScanner {
             listPrefix(bucket, scanPrefixes.getFirst(), results);
         } else {
             int activeThreads = Math.min(parallelism, scanPrefixes.size());
-            LOG.info("Starting PARALLEL scan for {} prefixes using {} threads...", scanPrefixes.size(), activeThreads);
-            ExecutorService executor = Executors.newFixedThreadPool(activeThreads);
+            LOG.info("Starting PARALLEL scan for {} prefixes using Virtual Threads...", scanPrefixes.size());
+            ExecutorService executor = Executors.newVirtualThreadPerTaskExecutor();
             try {
                 List<Future<?>> futures = new ArrayList<>();
                 for (String prefix : scanPrefixes) {

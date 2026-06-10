@@ -99,7 +99,7 @@ public class PhysicalDeletionService {
         List<String> deleted = Collections.synchronizedList(new ArrayList<>());
         List<String> failed = Collections.synchronizedList(new ArrayList<>());
 
-        ExecutorService executor = Executors.newFixedThreadPool(DEFAULT_PARALLELISM);
+        ExecutorService executor = Executors.newVirtualThreadPerTaskExecutor();
         List<Future<?>> futures = new ArrayList<>();
 
         for (String path : cooled) {
@@ -133,7 +133,7 @@ public class PhysicalDeletionService {
         List<String> failed = Collections.synchronizedList(new ArrayList<>());
         List<String> batch = new ArrayList<>();
 
-        ExecutorService executor = Executors.newFixedThreadPool(DEFAULT_PARALLELISM);
+        ExecutorService executor = Executors.newVirtualThreadPerTaskExecutor();
         List<Future<?>> futures = new ArrayList<>();
 
         for (String key : keys) {

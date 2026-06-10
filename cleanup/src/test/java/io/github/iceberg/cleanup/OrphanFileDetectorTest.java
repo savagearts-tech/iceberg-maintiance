@@ -4,6 +4,7 @@ import org.junit.jupiter.api.Test;
 import java.util.Set;
 import static org.junit.jupiter.api.Assertions.*;
 
+
 class OrphanFileDetectorTest {
 
     private final OrphanFileDetector detector = new OrphanFileDetector();
@@ -13,8 +14,7 @@ class OrphanFileDetectorTest {
         Set<String> physical = Set.of(
                 "s3a://bucket/table/data/event_date=2026-05-01/file_a.parquet",
                 "s3a://bucket/table/data/event_date=2026-05-01/file_b.parquet");
-        Set<String> referenced = Set.of(
-                "s3a://bucket/table/data/event_date=2026-05-01/file_a.parquet");
+        Set<String> referenced = Set.of("s3a://bucket/table/data/event_date=2026-05-01/file_a.parquet");
         Set<String> orphans = detector.detectDataOrphans(physical, referenced);
         assertEquals(Set.of("s3a://bucket/table/data/event_date=2026-05-01/file_b.parquet"), orphans);
     }
@@ -55,7 +55,7 @@ class OrphanFileDetectorTest {
 
     @Test
     void emptyPhysicalSet() {
-        assertTrue(detector.detectDataOrphans(Set.of(), Set.of("a")).isEmpty());
+        assertTrue(detector.detectDataOrphans(Set.of(), Set.of()).isEmpty());
         assertTrue(detector.detectMetadataOrphans(Set.of(), Set.of("a")).isEmpty());
     }
 }

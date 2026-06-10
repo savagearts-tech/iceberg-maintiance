@@ -127,10 +127,11 @@ public class EmptyPartitionCleaner {
     }
 
     public static boolean hasReferencedDataFile(String partitionPrefix, Set<String> referencedFiles) {
-        String prefix = ensureTrailingSlash(UriNormalizer.normalize(partitionPrefix));
+        if (referencedFiles == null || referencedFiles.isEmpty()) {
+            return false;
+        }
         for (String file : referencedFiles) {
-            String norm = UriNormalizer.normalize(file);
-            if (norm.startsWith(prefix)) {
+            if (file.startsWith(partitionPrefix)) {
                 return true;
             }
         }

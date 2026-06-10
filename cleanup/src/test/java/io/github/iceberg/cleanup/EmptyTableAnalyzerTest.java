@@ -2,6 +2,7 @@ package io.github.iceberg.cleanup;
 
 import org.junit.jupiter.api.Test;
 
+import java.util.Collections;
 import java.util.List;
 import java.util.Set;
 
@@ -11,72 +12,84 @@ class EmptyTableAnalyzerTest {
 
     private static final String DATA_ROOT = "s3a://bucket/db/tbl/data/";
 
+
     @Test
-    void eligibleWhenNoDataAndNoPartitions() {
-        var assessment = EmptyTableAnalyzer.analyze(
+    void analyze_eligibleWhenEmptyAndNoRefs() {
+        EmptyTableAnalyzer.Assessment a = EmptyTableAnalyzer.analyze(
                 DATA_ROOT,
-                Set.of(),
-                Set.of("s3a://bucket/db/tbl/metadata/v1.metadata.json"));
-        assertTrue(assessment.eligibleForTableCleanup());
-        assertEquals(0, assessment.remainingPartitionCount());
-        assertEquals(0, assessment.blockingPartitionCount());
+                Collections.emptySet(),
+                Set.of("s3a://bucket/db/tbl/metadata/v1.json"));
+
+        assertTrue(a.eligibleForTableCleanup());
+        assertFalse(a.hasReferencedData());
+        assertEquals(0, a.physicalDataFileCount());
+        assertEquals(1, a.physicalMetadataFileCount());
+        assertEquals(0, a.remainingPartitionCount());
     }
 
     @Test
-    void notEligibleWhenReferencedDataExists() {
-        var assessment = EmptyTableAnalyzer.analyze(
+    void analyze_notEligibleWhenHasRefs() {
+        EmptyTableAnalyzer.Assessment a = EmptyTableAnalyzer.analyze(
                 DATA_ROOT,
-                Set.of(DATA_ROOT + "event_date_day=1/part.parquet"),
-                Set.of(DATA_ROOT + "event_date_day=1/part.parquet"));
-        assertFalse(assessment.eligibleForTableCleanup());
-        assertTrue(assessment.hasReferencedData());
-        assertTrue(assessment.hasBlockingPartitions());
+                Set.of("s3a://bucket/db/tbl/data/f1.parquet"),
+                Set.of("s3a://bucket/db/tbl/metadata/v1.json"));
+
+        assertFalse(a.eligibleForTableCleanup());
+        assertTrue(a.hasReferencedData());
+        assertEquals(0, a.physicalDataFileCount());
+        assertEquals(1, a.physicalMetadataFileCount());
     }
 
     @Test
-    void notEligibleWhenOrphanDataRemainsOnStorage() {
-        var assessment = EmptyTableAnalyzer.analyze(
+    void analyze_notEligibleWhenHasPhysicalData() {
+        EmptyTableAnalyzer.Assessment a = EmptyTableAnalyzer.analyze(
                 DATA_ROOT,
-                Set.of(),
-                Set.of(DATA_ROOT + "event_date_day=1/orphan.parquet"));
-        assertFalse(assessment.eligibleForTableCleanup());
-        assertEquals(1, assessment.physicalDataFileCount());
-        assertTrue(assessment.hasBlockingPartitions());
-    }
-
-    @Test
-    void notEligibleWhenPartitionDirectoryStillOnStorage() {
-        var assessment = EmptyTableAnalyzer.analyze(
-                DATA_ROOT,
-                Set.of(),
-                Set.of("s3a://bucket/db/tbl/data/event_date_day=1/"));
-        assertFalse(assessment.eligibleForTableCleanup());
-        assertEquals(1, assessment.remainingPartitionCount());
-        assertEquals(0, assessment.blockingPartitionCount());
-        assertTrue(assessment.hasUncleanedPartitions());
-    }
-
-    @Test
-    void notEligibleWhenPartitionHasDataEvenWithoutRefs() {
-        var assessment = EmptyTableAnalyzer.analyze(
-                DATA_ROOT,
-                Set.of(),
+                Collections.emptySet(),
                 Set.of(
-                        DATA_ROOT + "event_date_day=1/orphan.parquet",
-                        DATA_ROOT + "event_date_day=2/"));
-        assertFalse(assessment.eligibleForTableCleanup());
-        assertEquals(2, assessment.remainingPartitionCount());
-        assertEquals(1, assessment.blockingPartitionCount());
+                        "s3a://bucket/db/tbl/data/orphan.parquet",
+                        "s3a://bucket/db/tbl/metadata/v1.json"));
+
+        assertFalse(a.eligibleForTableCleanup());
+        assertEquals(1, a.physicalDataFileCount());
+        assertEquals(1, a.physicalMetadataFileCount());
     }
 
     @Test
-    void eligibleWhenMetadataScanPrefixExistsButNoPhysicalPartition() {
-        var assessment = EmptyTableAnalyzer.analyze(
+    void analyze_notEligibleWhenHasRemainingPartitions() {
+        EmptyTableAnalyzer.Assessment a = EmptyTableAnalyzer.analyze(
                 DATA_ROOT,
-                Set.of(),
-                Set.of("s3a://bucket/db/tbl/metadata/v1.metadata.json"));
-        assertTrue(assessment.eligibleForTableCleanup());
-        assertEquals(0, assessment.remainingPartitionCount());
+                Collections.emptySet(),
+                Set.of(
+                        "s3a://bucket/db/tbl/data/event_date_day=20597/",
+                        "s3a://bucket/db/tbl/metadata/v1.json"));
+
+        assertFalse(a.eligibleForTableCleanup());
+        assertEquals(0, a.physicalDataFileCount());
+        assertEquals(1, a.remainingPartitionCount());
+        assertTrue(a.hasUncleanedPartitions());
+        assertFalse(a.hasBlockingPartitions());
+    }
+
+    @Test
+    void analyze_blockingPartitionPreventsTableCleanup() {
+        EmptyTableAnalyzer.Assessment a = EmptyTableAnalyzer.analyze(
+                DATA_ROOT,
+                Set.of("s3a://bucket/db/tbl/data/event_date_day=20597/part-001.parquet"),
+                Set.of("s3a://bucket/db/tbl/data/event_date_day=20597/", "s3a://bucket/db/tbl/data/event_date_day=20597/part-001.parquet"));
+
+        assertFalse(a.eligibleForTableCleanup());
+        assertEquals(1, a.remainingPartitionCount());
+        assertEquals(1, a.blockingPartitionCount());
+        assertTrue(a.hasBlockingPartitions());
+        assertFalse(a.hasUncleanedPartitions());
+    }
+
+    @Test
+    void extractPartitionPrefix_valid() {
+        assertEquals("s3a://bucket/db/tbl/data/event_date_day=20597/",
+                EmptyTableAnalyzer.extractPartitionPrefix(
+                        "s3a://bucket/db/tbl/data/event_date_day=20597/",
+                        DATA_ROOT, "db/tbl/data/"));
     }
 
     @Test

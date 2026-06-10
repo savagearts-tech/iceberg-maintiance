@@ -20,21 +20,26 @@ public class ScanOrphansCommand {
     private final String tableDataPrefix;
     private final S3Client s3Client;
     private final Expression partitionFilter;
+    private final java.util.List<String> explicitDataPrefixes;
+    private final boolean metadataOnly;
 
     private OrphanScanPipeline.Result lastResult;
 
     public ScanOrphansCommand(Table table, TableOperations tableOperations, String tableDataPrefix,
                               S3Client s3Client) {
-        this(table, tableOperations, tableDataPrefix, s3Client, null);
+        this(table, tableOperations, tableDataPrefix, s3Client, null, null, false);
     }
 
     public ScanOrphansCommand(Table table, TableOperations tableOperations, String tableDataPrefix,
-                              S3Client s3Client, Expression partitionFilter) {
+                              S3Client s3Client, Expression partitionFilter, java.util.List<String> explicitDataPrefixes,
+                              boolean metadataOnly) {
         this.table = table;
         this.tableOperations = tableOperations;
         this.tableDataPrefix = tableDataPrefix;
         this.s3Client = s3Client;
         this.partitionFilter = partitionFilter;
+        this.explicitDataPrefixes = explicitDataPrefixes;
+        this.metadataOnly = metadataOnly;
     }
 
     public OrphanScanPipeline.Result getLastResult() {
@@ -43,9 +48,9 @@ public class ScanOrphansCommand {
 
     public void execute() {
         lastResult = new OrphanScanPipeline().execute(
-                table, tableOperations, tableDataPrefix, s3Client, partitionFilter);
+                table, tableOperations, tableDataPrefix, s3Client, partitionFilter, explicitDataPrefixes, metadataOnly);
 
-        System.out.println("L1 scan: " + lastResult.referencedFiles().size() + " files referenced in metadata");
+        System.out.println("L1 scan: " + (lastResult.referencedFiles() != null ? lastResult.referencedFiles().size() : 0) + " referenced files");
         System.out.println("L2 scan: " + lastResult.physicalFiles().size() + " files on storage");
         System.out.println("Data orphans: " + lastResult.dataOrphans().size());
         System.out.println("Metadata orphans: " + lastResult.metadataOrphans().size());
