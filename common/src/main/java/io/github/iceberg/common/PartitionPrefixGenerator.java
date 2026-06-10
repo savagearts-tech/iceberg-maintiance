@@ -116,13 +116,13 @@ public class PartitionPrefixGenerator {
     }
 
     private static List<String> extractPartitionColumns(Table table) {
-        // Merge partition field names from ALL partition specs (tables can be
-        // repartitioned over time â€?old data uses old specs with different columns).
-        // Using all specs ensures prefix generation covers both old and new layouts.
-        return table.specs().values().stream()
-                .flatMap(spec -> spec.fields().stream())
+        // Use the current (default) partition spec only.
+        // The current spec determines the partition layout used by partitionToPath(),
+        // which is what S3 actually uses for recently written data.
+        // Historical data from previous specs is handled separately by
+        // prefixesFromPartitionPaths() which converts partition paths directly.
+        return table.spec().fields().stream()
                 .map(PartitionField::name)
-                .distinct()
                 .collect(Collectors.toList());
     }
 }
