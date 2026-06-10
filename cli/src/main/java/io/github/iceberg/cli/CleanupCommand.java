@@ -37,25 +37,28 @@ public class CleanupCommand {
     private final boolean dropCatalog;
     private final JdbcCatalog catalog;
     private final TableIdentifier tableId;
+    private final java.util.List<String> explicitDataPrefixes;
+    private final boolean metadataOnly;
 
     public CleanupCommand(Table table, TableOperations tableOperations, String tableDataPrefix,
                           RetentionConfig retentionConfig, S3Client s3Client, int coolingDays, boolean dryRun) {
         this(table, tableOperations, tableDataPrefix, retentionConfig, s3Client, coolingDays, dryRun, null,
-                false, false, null, null);
+                false, false, null, null, null, false);
     }
 
     public CleanupCommand(Table table, TableOperations tableOperations, String tableDataPrefix,
                           RetentionConfig retentionConfig, S3Client s3Client, int coolingDays,
                           boolean dryRun, Expression partitionFilter) {
         this(table, tableOperations, tableDataPrefix, retentionConfig, s3Client, coolingDays, dryRun, partitionFilter,
-                false, false, null, null);
+                false, false, null, null, null, false);
     }
 
     public CleanupCommand(Table table, TableOperations tableOperations, String tableDataPrefix,
                           RetentionConfig retentionConfig, S3Client s3Client, int coolingDays,
                           boolean dryRun, Expression partitionFilter,
                           boolean purgeEmptyTables, boolean dropCatalog,
-                          JdbcCatalog catalog, TableIdentifier tableId) {
+                          JdbcCatalog catalog, TableIdentifier tableId, java.util.List<String> explicitDataPrefixes,
+                          boolean metadataOnly) {
         this.table = table;
         this.tableOperations = tableOperations;
         this.tableDataPrefix = tableDataPrefix;
@@ -68,6 +71,8 @@ public class CleanupCommand {
         this.dropCatalog = dropCatalog;
         this.catalog = catalog;
         this.tableId = tableId;
+        this.explicitDataPrefixes = explicitDataPrefixes;
+        this.metadataOnly = metadataOnly;
     }
 
     public void execute() {
@@ -80,9 +85,9 @@ public class CleanupCommand {
 
         // Phase 2: Single-pass orphan scan (L1 + L2)
         OrphanScanPipeline.Result scan = new OrphanScanPipeline().execute(
-                table, tableOperations, tableDataPrefix, s3Client, partitionFilter);
+                table, tableOperations, tableDataPrefix, s3Client, partitionFilter, explicitDataPrefixes, metadataOnly);
 
-        System.out.println("L1 scan: " + scan.referencedFiles().size() + " files referenced in metadata");
+        System.out.println("L1 scan: " + (scan.referencedFiles() != null ? scan.referencedFiles().size() : 0) + " files referenced in metadata");
         System.out.println("L2 scan: " + scan.physicalFiles().size() + " files on storage");
         System.out.println("Data orphans: " + scan.dataOrphans().size());
         System.out.println("Metadata orphans: " + scan.metadataOrphans().size());
@@ -170,6 +175,22 @@ public class CleanupCommand {
             return;
         }
 
+        if (dropCatalog) {
+            if (catalog == null || tableId == null) {
+                System.err.println("  Cannot drop catalog entry: catalog not configured");
+                return;
+            }
+            boolean dropped = catalog.dropTable(tableId);
+            if (dropped) {
+                System.out.println("Dropped table from catalog: " + tableId);
+                LOG.info("Dropped empty table from catalog: {}", tableId);
+            } else {
+                System.err.println("Failed to drop table from catalog (may not exist): " + tableId);
+                LOG.warn("dropTable returned false for table: {}", tableId);
+                return;  // Don't purge storage if catalog drop failed
+            }
+        }
+
         EmptyTableCleaner tableCleaner = new EmptyTableCleaner(s3Client, dirGuard, deletionService);
         List<String> purged = tableCleaner.purgeEmptyTableStorage(assessment, physicalAfter);
         System.out.println("Purged " + purged.size() + " leftover storage object(s) for empty table");
@@ -180,15 +201,7 @@ public class CleanupCommand {
             return;
         }
 
-        if (dropCatalog) {
-            if (catalog == null || tableId == null) {
-                System.err.println("  Cannot drop catalog entry: catalog not configured");
-                return;
-            }
-            catalog.dropTable(tableId);
-            System.out.println("Dropped table from catalog: " + tableId);
-            LOG.info("Dropped empty table from catalog: {}", tableId);
-        } else {
+        if (!dropCatalog) {
             System.out.println("  Storage purged. Add --drop-catalog to remove the catalog entry.");
         }
     }
@@ -220,11 +233,11 @@ public class CleanupCommand {
         System.out.println("Dry-run: table would be eligible for table-level cleanup after partition and orphan removal:");
         System.out.println("  " + assessment.tableRootPrefix());
         if (purgeEmptyTables) {
-            System.out.println("  would purge " + assessment.physicalMetadataFileCount()
-                    + " metadata file(s) on storage");
             if (dropCatalog) {
                 System.out.println("  would drop catalog entry: " + table.name());
             }
+            System.out.println("  would purge " + assessment.physicalMetadataFileCount()
+                    + " metadata file(s) on storage");
         }
     }
 
