@@ -24,6 +24,7 @@ import java.net.URI;
 import java.util.List;
 import java.util.Properties;
 import java.util.Set;
+import java.util.stream.Stream;
 
 /**
  * Main entry point for the Iceberg maintenance CLI.
@@ -47,6 +48,7 @@ public class IcebergMaintenanceCli {
         int parallelism = parseParallelism(args);
 
         Properties config = loadConfig();
+        int batchSize = parseBatchSize(args, config, parallelism);
         TableFilter tableFilter = resolveTableFilter(config, args);
 
         if (tableName == null && !allTables && !tableFilter.isRestrictive()) {
@@ -85,17 +87,14 @@ public class IcebergMaintenanceCli {
                 }
 
                 if (batchMode) {
-                    List<TableIdentifier> tables = CatalogLister.listTables(catalog, tableFilter);
-                    if (tables.isEmpty()) {
-                        System.out.println("No tables matched the catalog filter.");
-                        return;
-                    }
-                    System.out.println("Processing " + tables.size() + " tables (parallelism=" + parallelism + ")...");
+                    Stream<TableIdentifier> tableStream = CatalogLister.streamTables(catalog, tableFilter);
+                    System.out.println("Processing tables (parallelism=" + parallelism
+                            + ", batchSize=" + batchSize + ")...");
                     ParallelMaintenanceExecutor executor = new ParallelMaintenanceExecutor(parallelism);
                     String warehouse = config.getProperty("warehouse");
 
                     ParallelMaintenanceExecutor.BatchResult result = executor.executeAll(
-                            tables, command,
+                            tableStream, command,
                             id -> {
                                 try {
                                     executeCommand(command, catalog, id,
@@ -103,7 +102,8 @@ public class IcebergMaintenanceCli {
                                 } catch (Exception e) {
                                     throw new RuntimeException(e);
                                 }
-                            });
+                            },
+                            batchSize);
 
                     System.out.println(result.summary());
                     if (result.failed() > 0) {
@@ -234,6 +234,19 @@ public class IcebergMaintenanceCli {
         return Runtime.getRuntime().availableProcessors();
     }
 
+    private static int parseBatchSize(String[] args, Properties config, int parallelism) {
+        String val = getFlagValue(args, "--batch-size");
+        if (val == null) {
+            val = config.getProperty("catalog.batchSize");
+        }
+        if (val != null) {
+            int bs = Integer.parseInt(val);
+            if (bs < 1) throw new IllegalArgumentException("batch-size must be >= 1, got: " + bs);
+            return bs;
+        }
+        return parallelism * 2;
+    }
+
     private static String getFlagValue(String[] args, String flag) {
         for (int i = 0; i < args.length - 1; i++) {
             if (args[i].equals(flag)) {
@@ -249,7 +262,7 @@ public class IcebergMaintenanceCli {
      */
     private static String resolveTableName(String[] args) {
         Set<String> flagKeys = Set.of("--namespace", "--table-prefix", "--table-pattern",
-                "--parallelism", "--time-scan-window-hours");
+                "--parallelism", "--batch-size", "--time-scan-window-hours");
         for (int i = 1; i < args.length; i++) {
             if (args[i].startsWith("--")) {
                 if (flagKeys.contains(args[i])) {
@@ -269,7 +282,7 @@ public class IcebergMaintenanceCli {
                 "jdbc.url", "jdbc.driver", "jdbc.user", "jdbc.password",
                 "warehouse", "table.name", "table.dataPrefix",
                 "s3.region", "s3.endpoint", "s3.pathStyleAccess", "dryRun", "coolingPeriodDays",
-                "catalog.namespace", "catalog.tablePrefix", "catalog.tablePattern",
+                "catalog.namespace", "catalog.tablePrefix", "catalog.tablePattern", "catalog.batchSize",
                 "purgeEmptyTables", "dropCatalog"
         };
         for (String key : keys) {
@@ -310,6 +323,7 @@ public class IcebergMaintenanceCli {
                 Options:
                   --all                    Process all tables (optionally narrowed by filters below)
                   --parallelism N          Max concurrent tables (default: CPU core count)
+                  --batch-size N           Max in-flight tasks for backpressure (default: parallelism * 2)
                   --namespace NS           Limit to namespace, e.g. alpha or a.b
                   --table-prefix P         Table name prefix, e.g. trace_
                   --table-pattern R        Regex on fully-qualified table name
@@ -329,6 +343,7 @@ public class IcebergMaintenanceCli {
                   catalog.namespace     Same as --namespace
                   catalog.tablePrefix   Same as --table-prefix
                   catalog.tablePattern  Same as --table-pattern
+                  catalog.batchSize     Same as --batch-size
                   s3.region             AWS region (default: us-east-1)
                   s3.endpoint           S3-compatible endpoint URL (e.g. http://localhost:9000 for MinIO)
                   s3.pathStyleAccess    Use path-style addressing (default: true, required for MinIO/OSS/COS)

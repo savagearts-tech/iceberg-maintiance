@@ -37,12 +37,13 @@ public class ListEmptyTablesCommand {
     }
 
     public List<EmptyTableAnalyzer.Assessment> execute() {
-        List<TableIdentifier> tables = CatalogLister.listTables(catalog, tableFilter);
         List<EmptyTableAnalyzer.Assessment> emptyTables = new ArrayList<>();
+        int[] scanned = {0};
 
-        System.out.println("Scanning " + tables.size() + " tables for empty data...");
-        for (TableIdentifier tableId : tables) {
+        System.out.println("Scanning tables for empty data...");
+        CatalogLister.streamTables(catalog, tableFilter).forEach(tableId -> {
             try {
+                scanned[0]++;
                 EmptyTableAnalyzer.Assessment assessment = assessTable(tableId);
                 if (assessment.eligibleForTableCleanup()) {
                     emptyTables.add(assessment);
@@ -51,10 +52,10 @@ public class ListEmptyTablesCommand {
                 LOG.warn("Failed to assess table {}: {}", tableId, e.getMessage());
                 System.err.println("  SKIP " + tableId + " (error: " + e.getMessage() + ")");
             }
-        }
+        });
 
         emptyTables.sort(Comparator.comparing(EmptyTableAnalyzer.Assessment::tableDataPrefix));
-        printReport(emptyTables, tables.size());
+        printReport(emptyTables, scanned[0]);
         return emptyTables;
     }
 

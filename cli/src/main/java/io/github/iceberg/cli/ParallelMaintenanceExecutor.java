@@ -1,15 +1,17 @@
 package io.github.iceberg.cli;
 
+import org.apache.iceberg.catalog.TableIdentifier;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.Iterator;
 import java.util.List;
 import java.util.concurrent.*;
 import java.util.function.Consumer;
-import java.util.stream.Collectors;
+import java.util.stream.Stream;
 
 /**
  * Executes Iceberg table maintenance tasks in parallel using a fixed thread pool.
@@ -43,9 +45,9 @@ public class ParallelMaintenanceExecutor {
      * @return list of per-table results in completion order
      */
     public BatchResult executeAll(
-            List<org.apache.iceberg.catalog.TableIdentifier> tables,
+            List<TableIdentifier> tables,
             String command,
-            Consumer<org.apache.iceberg.catalog.TableIdentifier> task) {
+            Consumer<TableIdentifier> task) {
 
         Instant start = Instant.now();
         int total = tables.size();
@@ -94,6 +96,89 @@ public class ParallelMaintenanceExecutor {
             }
         }
 
+        long wallClockMs = Duration.between(start, Instant.now()).toMillis();
+        return new BatchResult(results, wallClockMs, total);
+    }
+
+    /**
+     * Executes a maintenance task on each table from a lazy stream, with backpressure.
+     *
+     * <p>Tables are pulled from the stream and submitted to the thread pool one at a time,
+     * but at most {@code batchSize} tasks are in-flight at any moment. This bounds memory
+     * usage regardless of catalog size.
+     *
+     * @param tableStream lazy stream of table identifiers
+     * @param command     the command name (for result recording)
+     * @param task        callback that performs the actual maintenance for a single table
+     * @param batchSize   maximum number of in-flight tasks (backpressure limit)
+     * @return batch result with per-table outcomes
+     */
+    public BatchResult executeAll(
+            Stream<TableIdentifier> tableStream,
+            String command,
+            Consumer<TableIdentifier> task,
+            int batchSize) {
+
+        if (batchSize < 1) {
+            throw new IllegalArgumentException("batchSize must be >= 1, got: " + batchSize);
+        }
+
+        Instant start = Instant.now();
+        List<TableTaskResult> results = new CopyOnWriteArrayList<>();
+        Semaphore semaphore = new Semaphore(batchSize);
+        Iterator<TableIdentifier> iterator = tableStream.iterator();
+
+        ExecutorService executor = Executors.newFixedThreadPool(parallelism);
+        registerShutdownHook(executor);
+
+        List<CompletableFuture<Void>> futures = new ArrayList<>();
+
+        try {
+            while (iterator.hasNext()) {
+                TableIdentifier id = iterator.next();
+                semaphore.acquire();
+
+                CompletableFuture<Void> future = CompletableFuture.runAsync(() -> {
+                    Instant taskStart = Instant.now();
+                    String tableName = id.toString();
+                    try {
+                        task.accept(id);
+                        long elapsed = Duration.between(taskStart, Instant.now()).toMillis();
+                        results.add(TableTaskResult.success(tableName, command, elapsed));
+                    } catch (Exception e) {
+                        long elapsed = Duration.between(taskStart, Instant.now()).toMillis();
+                        results.add(TableTaskResult.failure(tableName, command, elapsed, e.getMessage()));
+                        LOG.warn("Table {} failed: {}", tableName, e.getMessage());
+                    } catch (Error e) {
+                        long elapsed = Duration.between(taskStart, Instant.now()).toMillis();
+                        results.add(TableTaskResult.failure(tableName, command, elapsed, e.getMessage()));
+                        LOG.error("Table {} encountered fatal error: {}", tableName, e.getMessage(), e);
+                        throw e;
+                    } finally {
+                        semaphore.release();
+                    }
+                }, executor);
+
+                futures.add(future);
+            }
+
+            CompletableFuture.allOf(futures.toArray(new CompletableFuture[0])).join();
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            LOG.warn("Batch execution interrupted");
+        } finally {
+            executor.shutdown();
+            try {
+                if (!executor.awaitTermination(30, TimeUnit.SECONDS)) {
+                    executor.shutdownNow();
+                }
+            } catch (InterruptedException e) {
+                executor.shutdownNow();
+                Thread.currentThread().interrupt();
+            }
+        }
+
+        int total = results.size();
         long wallClockMs = Duration.between(start, Instant.now()).toMillis();
         return new BatchResult(results, wallClockMs, total);
     }
